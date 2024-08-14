@@ -4,7 +4,6 @@
 using System.Configuration;
 using System.Web;
 using OpenTelemetry;
-using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -21,27 +20,12 @@ public class WebApiApplication : HttpApplication
     {
         var builder = Sdk.CreateTracerProviderBuilder()
             .ConfigureResource(resource => resource.AddService("Wcf-AspNetServer"))
-            .AddAspNetInstrumentation()
-            .AddWcfInstrumentation();
-
-        switch (ConfigurationManager.AppSettings["UseExporter"].ToUpperInvariant())
-        {
-            case "ZIPKIN":
-                builder.AddZipkinExporter(zipkinOptions =>
-                {
-                    zipkinOptions.Endpoint = new Uri(ConfigurationManager.AppSettings["ZipkinEndpoint"]);
-                });
-                break;
-            case "OTLP":
-                builder.AddOtlpExporter(otlpOptions =>
-                {
-                    otlpOptions.Endpoint = new Uri(ConfigurationManager.AppSettings["OtlpEndpoint"]);
-                });
-                break;
-            default:
-                builder.AddConsoleExporter(options => options.Targets = ConsoleExporterOutputTargets.Debug);
-                break;
-        }
+            .AddWcfInstrumentation()
+            .AddOtlpExporter(otlpOptions =>
+            {
+                otlpOptions.Endpoint = new Uri(ConfigurationManager.AppSettings["OtlpEndpoint"]);
+            })
+            .AddConsoleExporter(a => a.Targets = OpenTelemetry.Exporter.ConsoleExporterOutputTargets.Debug);
 
         this.tracerProvider = builder.Build();
     }
