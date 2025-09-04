@@ -1,13 +1,13 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Text;
+using System.Buffers;
 
 namespace OpenTelemetry.Instrumentation;
 
 internal static class SqlProcessor
 {
-    private const int CacheCapacity = 1000;
+    private const int CacheCapacity = 0;
     private static readonly Dictionary<string, SqlStatementInfo> Cache = [];
 
     public static SqlStatementInfo GetSanitizedSql(string? sql)
@@ -43,7 +43,17 @@ internal static class SqlProcessor
 
     private static SqlStatementInfo SanitizeSql(string sql)
     {
-        var state = new SqlProcessorState(sql.Length);
+        // We use a single buffer for both sanitized SQL and DB query summary
+        // DB query summary starts from the index of the length of the input SQL
+        // We rent a buffer twice the size of the input SQL to ensure we have enough space
+        var buffer = ArrayPool<char>.Shared.Rent(sql.Length * 2);
+
+        var summaryStartIndex = sql.Length;
+        var captureNextTokenAsTarget = false;
+        var inFromClause = false;
+        var sanitizedPosition = 0;
+        var summaryPosition = 0;
+        var bufferSpan = buffer.AsSpan();
 
         for (var i = 0; i < sql.Length; ++i)
         {
@@ -56,16 +66,21 @@ internal static class SqlProcessor
                 SanitizeHexLiteral(sql, ref i) ||
                 SanitizeNumericLiteral(sql, ref i))
             {
-                state.SanitizedSql.Append('?');
+                bufferSpan[sanitizedPosition++] = '?';
                 continue;
             }
 
-            WriteToken(sql, ref i, state);
+            WriteToken(sql, ref i, bufferSpan, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause);
         }
 
-        return new SqlStatementInfo(
-            state.SanitizedSql.ToString(),
-            state.DbQuerySummary.ToString());
+        var sqlStatementInfo = new SqlStatementInfo(
+            bufferSpan.Slice(0, sanitizedPosition).ToString(),
+            bufferSpan.Slice(summaryStartIndex, summaryPosition).ToString());
+
+        // We don't clear the buffer as we know the content has been sanitized
+        ArrayPool<char>.Shared.Return(buffer);
+
+        return sqlStatementInfo;
     }
 
     private static bool SkipComment(string sql, ref int index)
@@ -235,21 +250,29 @@ internal static class SqlProcessor
         return false;
     }
 
-    private static void WriteToken(string sql, ref int index, SqlProcessorState state)
+    private static void WriteToken(
+        string sql,
+        ref int index,
+        Span<char> buffer,
+        int summaryStartIndex,
+        ref int sanitizedPosition,
+        ref int summaryPosition,
+        ref bool captureNextTokenAsTarget,
+        ref bool inFromClause)
     {
         var i = index;
         var ch = sql[i];
 
-        if (LookAhead("SELECT", sql, ref i, state) ||
-            LookAhead("UPDATE", sql, ref i, state) ||
-            LookAhead("INSERT", sql, ref i, state) ||
-            LookAhead("DELETE", sql, ref i, state) ||
-            LookAheadDdl("CREATE", sql, ref i, state) ||
-            LookAheadDdl("ALTER", sql, ref i, state) ||
-            LookAheadDdl("DROP", sql, ref i, state) ||
-            LookAhead("INTO", sql, ref i, state, false, true) ||
-            LookAhead("FROM", sql, ref i, state, false, true, true) ||
-            LookAhead("JOIN", sql, ref i, state, false, true))
+        if (LookAhead("SELECT", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAhead("UPDATE", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAhead("INSERT", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAhead("DELETE", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAheadDdl("CREATE", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAheadDdl("ALTER", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAheadDdl("DROP", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause) ||
+            LookAhead("INTO", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, true) ||
+            LookAhead("FROM", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, true, true) ||
+            LookAhead("JOIN", sql, ref i, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, true))
         {
             i -= 1;
         }
@@ -260,70 +283,90 @@ internal static class SqlProcessor
                 ch = sql[i];
                 if (char.IsLetter(ch) || ch == '_' || ch == '.' || char.IsDigit(ch))
                 {
-                    state.SanitizedSql.Append(ch);
+                    buffer[sanitizedPosition++] = ch;
                     continue;
                 }
 
                 break;
             }
 
-            if (state.CaptureNextTokenAsTarget)
+            if (captureNextTokenAsTarget)
             {
-                state.CaptureNextTokenAsTarget = false;
-#if NET
-                state.DbQuerySummary.Append(' ').Append(sql.AsSpan(index, i - index));
-#else
-                var collection = sql.Substring(index, i - index);
-                state.DbQuerySummary.Append(' ').Append(collection);
-#endif
+                captureNextTokenAsTarget = false;
+                var toAppend = sql.AsSpan(index, i - index);
+
+                if (summaryPosition > 0)
+                {
+                    buffer[summaryStartIndex + summaryPosition++] = ' ';
+                }
+
+                toAppend.CopyTo(buffer.Slice(summaryStartIndex + summaryPosition));
+                summaryPosition += toAppend.Length;
             }
 
             i -= 1;
 
-            if (state.InFromClause && ch == ',')
+            if (inFromClause && ch == ',')
             {
-                state.CaptureNextTokenAsTarget = true;
+                captureNextTokenAsTarget = true;
             }
         }
         else
         {
-            state.SanitizedSql.Append(ch);
+            buffer[sanitizedPosition++] = ch;
         }
 
         index = i;
     }
 
-    private static void AppendNormalized(StringBuilder builder, char ch)
-    {
-        if (!char.IsWhiteSpace(ch) || builder.Length == 0 || !char.IsWhiteSpace(builder[builder.Length - 1]))
-        {
-            builder.Append(ch);
-        }
-    }
-
-    private static bool LookAheadDdl(string operation, string sql, ref int index, SqlProcessorState state)
+    /// <summary>
+    /// Special handling for SQL Data Definition Language operations.
+    /// </summary>
+    private static bool LookAheadDdl(
+        string operation,
+        string sql,
+        ref int index,
+        Span<char> buffer,
+        int summaryStartIndex,
+        ref int sanitizedPosition,
+        ref int summaryPosition,
+        ref bool captureNextTokenAsTarget,
+        ref bool inFromClause)
     {
         var initialIndex = index;
 
-        if (LookAhead(operation, sql, ref index, state, false, false))
+        if (LookAhead(operation, sql, ref index, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, false))
         {
             for (; index < sql.Length && char.IsWhiteSpace(sql[index]); ++index)
             {
-                state.SanitizedSql.Append(sql[index]);
+                buffer[sanitizedPosition++] = sql[index];
             }
 
-            if (LookAhead("TABLE", sql, ref index, state, false, false) ||
-                LookAhead("INDEX", sql, ref index, state, false, false) ||
-                LookAhead("PROCEDURE", sql, ref index, state, false, false) ||
-                LookAhead("VIEW", sql, ref index, state, false, false) ||
-                LookAhead("DATABASE", sql, ref index, state, false, false))
+            if (LookAhead("TABLE", sql, ref index, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, false) ||
+                LookAhead("INDEX", sql, ref index, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, false) ||
+                LookAhead("PROCEDURE", sql, ref index, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, false) ||
+                LookAhead("VIEW", sql, ref index, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, false) ||
+                LookAhead("DATABASE", sql, ref index, buffer, summaryStartIndex, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause, false, false))
             {
-                state.CaptureNextTokenAsTarget = true;
+                captureNextTokenAsTarget = true;
             }
 
             for (var i = initialIndex; i < index; ++i)
             {
-                AppendNormalized(state.DbQuerySummary, sql[i]);
+                var ch = sql[i];
+
+                if (summaryPosition == 0)
+                {
+                    buffer.Slice(summaryStartIndex)[summaryPosition++] = sql[i];
+                    continue;
+                }
+
+                if (buffer[summaryStartIndex + summaryPosition - 1] == ' ' && char.IsWhiteSpace(sql[i]))
+                {
+                    continue;
+                }
+
+                buffer.Slice(summaryStartIndex)[summaryPosition++] = sql[i];
             }
 
             return true;
@@ -332,7 +375,19 @@ internal static class SqlProcessor
         return false;
     }
 
-    private static bool LookAhead(string compare, string sql, ref int index, SqlProcessorState state, bool isOperation = true, bool captureNextTokenAsTarget = false, bool inFromClause = false)
+    private static bool LookAhead(
+        string compare,
+        string sql,
+        ref int index,
+        Span<char> buffer,
+        int summaryStartIndex,
+        ref int sanitizedPosition,
+        ref int summaryPosition,
+        ref bool captureNextTokenAsTarget,
+        ref bool inFromClause,
+        bool isOperation = true,
+        bool captureNextTokenAsTargetIfMatched = false,
+        bool inFromClauseIfMatched = false)
     {
         int i = index;
         var sqlLength = sql.Length;
@@ -360,45 +415,28 @@ internal static class SqlProcessor
 
         if (isOperation)
         {
-            if (state.DbQuerySummary.Length > 0)
+            if (summaryPosition > 0)
             {
-                state.DbQuerySummary.Append(' ');
+                buffer.Slice(summaryStartIndex)[summaryPosition++] = ' ';
             }
 
             for (var k = index; k < i; ++k)
             {
-                state.DbQuerySummary.Append(sql[k]);
-                state.SanitizedSql.Append(sql[k]);
+                buffer[sanitizedPosition++] = sql[k];
+                buffer.Slice(summaryStartIndex)[summaryPosition++] = sql[k];
             }
         }
         else
         {
             for (var k = index; k < i; ++k)
             {
-                state.SanitizedSql.Append(sql[k]);
+                buffer[sanitizedPosition++] = sql[k];
             }
         }
 
         index = i;
-        state.CaptureNextTokenAsTarget = captureNextTokenAsTarget;
-        state.InFromClause = inFromClause;
+        captureNextTokenAsTarget = captureNextTokenAsTargetIfMatched;
+        inFromClause = inFromClauseIfMatched;
         return true;
-    }
-
-    internal class SqlProcessorState
-    {
-        public SqlProcessorState(int maxCapacity)
-        {
-            this.SanitizedSql = new StringBuilder(maxCapacity);
-            this.DbQuerySummary = new StringBuilder(maxCapacity);
-        }
-
-        public StringBuilder SanitizedSql { get; set; }
-
-        public StringBuilder DbQuerySummary { get; set; }
-
-        public bool CaptureNextTokenAsTarget { get; set; }
-
-        public bool InFromClause { get; set; }
     }
 }
