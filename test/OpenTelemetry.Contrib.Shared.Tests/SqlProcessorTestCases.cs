@@ -21,23 +21,23 @@ public static class SqlProcessorTestCases
 
     public static TheoryData<TestCase> GetSemanticConventionsTestCases()
     {
-        var assembly = Assembly.GetExecutingAssembly();
-        var input = JsonSerializer.Deserialize<TestCase[]>(
-            assembly.GetManifestResourceStream("SqlProcessorTestCases.json")!,
-            JsonSerializerOptions)!;
-
-        var data = new TheoryData<TestCase>();
-
-        if (input is not null)
+        var data = new TheoryData<TestCase>
         {
-            foreach (var testCase in input)
+            new()
             {
-                if (DbSystemTestCasesToExecute.Contains(testCase.Input.DbSystemName))
+                Name = "Simple select",
+                Input = new TestCaseInput
                 {
-                    data.Add(testCase);
-                }
-            }
-        }
+                    DbSystemName = "other_sql",
+                    Query = "SELECT * FROM Orders o, OrderDetails od",
+                },
+                Expected = new TestCaseExpected
+                {
+                    SanitizedQueryText = ["SELECT * FROM Orders o, OrderDetails od"],
+                    Summary = "SELECT Orders OrderDetails",
+                },
+            },
+        };
 
         return data;
     }

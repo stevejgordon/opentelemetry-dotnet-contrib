@@ -15,6 +15,8 @@ if (Debugger.IsAttached || (args.Length > 0 && args[0] == "execute"))
         Iterations = 100,
     };
 
+    benchmarks.Simple();
+
     MemoryProfiler.CollectAllocations(true);
 
     MemoryProfiler.GetSnapshot();
