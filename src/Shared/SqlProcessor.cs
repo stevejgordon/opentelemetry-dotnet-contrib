@@ -10,6 +10,10 @@ internal static class SqlProcessor
     private const int CacheCapacity = 0;
     private static readonly Dictionary<string, SqlStatementInfo> Cache = [];
 
+#if NET
+    private static readonly SearchValues<char> WhitespaceSearchValues = SearchValues.Create([' ', '\t', '\r', '\n']);
+#endif
+
     private static ReadOnlySpan<char> SelectSpan => "SELECT".AsSpan();
 
     private static ReadOnlySpan<char> FromSpan => "FROM".AsSpan();
@@ -23,7 +27,7 @@ internal static class SqlProcessor
 
         if (!Cache.TryGetValue(sql, out var sqlStatementInfo))
         {
-            sqlStatementInfo = SanitizeSql(sql);
+            sqlStatementInfo = SanitizeSql(sql.AsSpan());
 
             if (Cache.Count == CacheCapacity)
             {
@@ -45,43 +49,46 @@ internal static class SqlProcessor
         return sqlStatementInfo;
     }
 
-    private static SqlStatementInfo SanitizeSql(string sql)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("StyleCop.CSharp.SpacingRules", "SA1005:Single line comments should begin with single space", Justification = "Temp")]
+    private static SqlStatementInfo SanitizeSql(ReadOnlySpan<char> sql)
     {
         // We use a single buffer for both sanitized SQL and DB query summary
         // DB query summary starts from the index of the length of the input SQL
         // We rent a buffer twice the size of the input SQL to ensure we have enough space
-        var buffer = ArrayPool<char>.Shared.Rent(sql.Length * 2);
+        var rentedBuffer = ArrayPool<char>.Shared.Rent(sql.Length * 2);
 
         var captureNextTokenAsTarget = false;
         var inFromClause = false;
         var sanitizedPosition = 0;
         var summaryPosition = 0;
-        var bufferSpan = buffer.AsSpan();
+        var buffer = rentedBuffer.AsSpan();
 
-        for (var i = 0; i < sql.Length; ++i)
+        var parsePosition = 0;
+
+        while (parsePosition < sql.Length)
         {
-            if (SkipComment(sql, ref i))
-            {
-                continue;
-            }
+            //if (SkipComment(sql, ref parsePosition))
+            //{
+            //    continue;
+            //}
 
-            if (SanitizeStringLiteral(sql, ref i) ||
-                SanitizeHexLiteral(sql, ref i) ||
-                SanitizeNumericLiteral(sql, ref i))
-            {
-                bufferSpan[sanitizedPosition++] = '?';
-                continue;
-            }
+            //if (SanitizeStringLiteral(sql, ref parsePosition) ||
+            //    SanitizeHexLiteral(sql, ref parsePosition) ||
+            //    SanitizeNumericLiteral(sql, ref parsePosition))
+            //{
+            //    bufferSpan[sanitizedPosition++] = '?';
+            //    continue;
+            //}
 
-            WriteToken(sql.AsSpan(), ref i, bufferSpan, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause);
+            WriteToken(sql, ref parsePosition, buffer, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause);
         }
 
         var sqlStatementInfo = new SqlStatementInfo(
-            bufferSpan.Slice(0, sanitizedPosition).ToString(),
-            bufferSpan.Slice(buffer.Length / 2, summaryPosition).ToString());
+            buffer.Slice(0, sanitizedPosition).ToString(),
+            buffer.Slice(rentedBuffer.Length / 2, summaryPosition).ToString());
 
         // We don't clear the buffer as we know the content has been sanitized
-        ArrayPool<char>.Shared.Return(buffer);
+        ArrayPool<char>.Shared.Return(rentedBuffer);
 
         return sqlStatementInfo;
     }
@@ -253,10 +260,11 @@ internal static class SqlProcessor
         return false;
     }
 
-    private static bool TryWriteStatement(
+    private static bool TryWritePotentialKeyword(
         ReadOnlySpan<char> sql,
         ReadOnlySpan<char> statement,
         Span<char> destination,
+        ref int parsePosition,
         ref int sanitizedPosition,
         ref int summaryPosition,
         bool isOperation = true)
@@ -266,9 +274,26 @@ internal static class SqlProcessor
         var initialSummaryPosition = summaryPosition;
         var summaryStartIndex = destination.Length / 2;
 
+        var sqlToCompare = sql.Slice(parsePosition);
+
+        // Check for whitespace after the potential token.
+        // Early exit if no whitespace is found.
+        if (sqlToCompare.Length > statement.Length)
+        {
+#if NET
+            if (!WhitespaceSearchValues.Contains(sqlToCompare[statement.Length]))
+#else
+            var nextChar = sqlToCompare[statement.Length];
+            if (nextChar != ' ' && nextChar != '\t' && nextChar != 'r' && nextChar != '\n')
+#endif
+            {
+                return false;
+            }
+        }
+
         while (compareIndex < statement.Length)
         {
-            var nextChar = sql[compareIndex];
+            var nextChar = sqlToCompare[compareIndex];
             var nextCharUpper = char.ToUpperInvariant(nextChar);
 
             if (matchedStatement && nextCharUpper != statement[compareIndex])
@@ -291,6 +316,7 @@ internal static class SqlProcessor
             }
 
             compareIndex++;
+            parsePosition++;
         }
 
         if (!matchedStatement)
@@ -304,68 +330,42 @@ internal static class SqlProcessor
     [System.Diagnostics.CodeAnalysis.SuppressMessage("StyleCop.CSharp.SpacingRules", "SA1005:Single line comments should begin with single space", Justification = "Temp")]
     private static void WriteToken(
         ReadOnlySpan<char> sql,
-        ref int index,
+        ref int parsePosition,
         Span<char> buffer,
         ref int sanitizedPosition,
         ref int summaryPosition,
         ref bool captureNextTokenAsTarget,
         ref bool inFromClause)
     {
-        var nextChar = sql[index];
+        var nextChar = sql[parsePosition];
         var nextCharUpper = char.ToUpperInvariant(nextChar);
 
-        if (nextCharUpper == 'S' && sql.Length >= SelectSpan.Length)
+        // var initialSanitizedPosition = sanitizedPosition;
+        // var initialSummaryPosition = summaryPosition;
+
+        var remainingSql = sql.Slice(parsePosition);
+
+        if (nextCharUpper == 'S' && remainingSql.Length >= SelectSpan.Length)
         {
             // We may be in a SELECT statement
-            if (TryWriteStatement(sql.Slice(index, SelectSpan.Length), SelectSpan, buffer, ref sanitizedPosition, ref summaryPosition))
+            if (TryWritePotentialKeyword(sql, SelectSpan, buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition))
             {
                 captureNextTokenAsTarget = false;
                 inFromClause = false;
-
-                index += 5; // outer loop will increment index by 1 more
                 return;
             }
         }
 
-        if (nextCharUpper == 'F' && sql.Length >= FromSpan.Length)
+        if (nextCharUpper == 'F' && remainingSql.Length >= FromSpan.Length)
         {
-            // We may be in a SELECT statement
-            if (TryWriteStatement(sql.Slice(index, FromSpan.Length), FromSpan, buffer, ref sanitizedPosition, ref summaryPosition, isOperation: false))
+            // We may be in a FROM statement
+            if (TryWritePotentialKeyword(sql, FromSpan, buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition, isOperation: false))
             {
                 captureNextTokenAsTarget = true;
                 inFromClause = true;
-
-                index += 3; // outer loop will increment index by 1 more
                 return;
             }
         }
-
-        //if (sql.Slice(index).StartsWith(SelectSpan, StringComparison.OrdinalIgnoreCase))
-        //{
-        //    var tokenLength = SelectSpan.Length;
-
-        //    if (sql.Length > tokenLength)
-        //    {
-        //        var nextChar = sql[SelectSpan.Length];
-
-        //        if (char.IsLetter(nextChar) || nextChar == '_' || char.IsDigit(nextChar))
-        //        {
-        //            return;
-        //        }
-        //    }
-
-        //    // Copy the existing token as-is to the sanitized SQL
-        //    sql.Slice(index, tokenLength).CopyTo(buffer.Slice(sanitizedPosition));
-
-        //    // Copy the uppercase token to the summary
-        //    SelectSpan.CopyTo(buffer.Slice(summaryStartIndex + summaryPosition));
-
-        //    summaryPosition += tokenLength;
-        //    sanitizedPosition += tokenLength;
-
-        //    index += tokenLength;
-        //    return;
-        //}
 
         if (char.IsLetter(nextChar) || nextChar == '_')
         {
@@ -374,9 +374,9 @@ internal static class SqlProcessor
                 buffer.Slice(buffer.Length / 2)[summaryPosition++] = ' ';
             }
 
-            while (index < sql.Length)
+            while (parsePosition < sql.Length)
             {
-                nextChar = sql[index];
+                nextChar = sql[parsePosition];
 
                 if (char.IsLetter(nextChar) || nextChar == '_' || nextChar == '.' || char.IsDigit(nextChar))
                 {
@@ -387,7 +387,7 @@ internal static class SqlProcessor
                         buffer.Slice(buffer.Length / 2)[summaryPosition++] = nextChar;
                     }
 
-                    index++;
+                    parsePosition++;
                     continue;
                 }
 
@@ -395,12 +395,11 @@ internal static class SqlProcessor
             }
 
             captureNextTokenAsTarget = inFromClause && nextChar == ',';
-
-            index -= 1; // outer loop will increment index by 1 more
         }
         else
         {
             buffer[sanitizedPosition++] = nextChar;
+            parsePosition++;
         }
     }
 
