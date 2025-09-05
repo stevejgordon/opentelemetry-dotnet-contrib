@@ -14,6 +14,12 @@ internal static class SqlProcessor
     private static readonly SearchValues<char> WhitespaceSearchValues = SearchValues.Create([' ', '\t', '\r', '\n']);
 #endif
 
+    private static readonly string[] DmlStatements = ["SELECT", "INSERT", "UPDATE", "DELETE"];
+
+    private static readonly string[] Clauses = ["FROM", "INTO", "JOIN"];
+
+    private static readonly string[] DdlStatements = ["CREATE", "ALTER", "DROP"];
+
     private static ReadOnlySpan<char> SelectSpan => "SELECT".AsSpan();
 
     private static ReadOnlySpan<char> FromSpan => "FROM".AsSpan();
@@ -340,30 +346,31 @@ internal static class SqlProcessor
         var nextChar = sql[parsePosition];
         var nextCharUpper = char.ToUpperInvariant(nextChar);
 
-        // var initialSanitizedPosition = sanitizedPosition;
-        // var initialSummaryPosition = summaryPosition;
-
         var remainingSql = sql.Slice(parsePosition);
 
-        if (nextCharUpper == 'S' && remainingSql.Length >= SelectSpan.Length)
+        foreach (var operation in DmlStatements)
         {
-            // We may be in a SELECT statement
-            if (TryWritePotentialKeyword(sql, SelectSpan, buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition))
+            if (nextCharUpper == operation[0] && remainingSql.Length >= operation.Length)
             {
-                captureNextTokenAsTarget = false;
-                inFromClause = false;
-                return;
+                if (TryWritePotentialKeyword(sql, operation.AsSpan(), buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition))
+                {
+                    captureNextTokenAsTarget = false;
+                    inFromClause = false;
+                    return;
+                }
             }
         }
 
-        if (nextCharUpper == 'F' && remainingSql.Length >= FromSpan.Length)
+        foreach (var clause in Clauses)
         {
-            // We may be in a FROM statement
-            if (TryWritePotentialKeyword(sql, FromSpan, buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition, isOperation: false))
+            if (nextCharUpper == clause[0] && remainingSql.Length >= clause.Length)
             {
-                captureNextTokenAsTarget = true;
-                inFromClause = true;
-                return;
+                if (TryWritePotentialKeyword(sql, clause.AsSpan(), buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition, isOperation: false))
+                {
+                    captureNextTokenAsTarget = true;
+                    inFromClause = clause[0] == 'F';
+                    return;
+                }
             }
         }
 
@@ -522,21 +529,5 @@ internal static class SqlProcessor
         captureNextTokenAsTarget = captureNextTokenAsTargetIfMatched;
         inFromClause = inFromClauseIfMatched;
         return true;
-    }
-
-    private readonly struct StatementInfo
-    {
-        public StatementInfo(string statement, bool isOperation = true, bool nextTokenIsTarget = false)
-        {
-            this.Statement = statement;
-            this.IsOperation = isOperation;
-            this.NextTokenIsTarget = nextTokenIsTarget;
-        }
-
-        public string Statement { get; } = string.Empty;
-
-        public bool IsOperation { get; }
-
-        public bool NextTokenIsTarget { get; }
     }
 }
