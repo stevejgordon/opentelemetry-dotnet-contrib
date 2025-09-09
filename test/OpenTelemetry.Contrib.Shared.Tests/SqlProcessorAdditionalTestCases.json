@@ -26,16 +26,29 @@
     }
   },
   {
-    "name": "create_unique_index",
+    "name": "create_unique_clustered_index",
     "input": {
       "db.system.name": "other_sql",
-      "query": "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
+      "query": "CREATE UNIQUE CLUSTERED INDEX IX_Employee_Email ON Employees (Email);"
     },
     "expected": {
       "db.query.text": [
-        "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
+        "CREATE UNIQUE CLUSTERED INDEX IX_Employee_Email ON Employees (Email);"
       ],
-      "db.query.summary": "CREATE UNIQUE INDEX Employees"
+      "db.query.summary": "CREATE UNIQUE CLUSTERED INDEX Employees"
+    }
+  },
+  {
+    "name": "select_distinct",
+    "input": {
+      "db.system.name": "other_sql",
+      "query": "SELECT DISTINCT Country FROM Countries"
+    },
+    "expected": {
+      "db.query.text": [
+        "SELECT DISTINCT Country FROM Countries"
+      ],
+      "db.query.summary": "SELECT DISTINCT Countries"
     }
   }
 ]
