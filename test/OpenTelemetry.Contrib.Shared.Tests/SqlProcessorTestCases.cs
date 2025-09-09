@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Xunit;
@@ -16,41 +17,42 @@ public static class SqlProcessorTestCases
         Converters = { new JsonStringEnumConverter() },
     };
 
-    // private static readonly HashSet<string> DbSystemTestCasesToExecute = ["other_sql"];
+    private static readonly HashSet<string> DbSystemTestCasesToExecute = ["other_sql"];
 
     public static TheoryData<TestCase> GetSemanticConventionsTestCases()
     {
-        var data = new TheoryData<TestCase>
+        var data = new TheoryData<TestCase>();
+
+        var assembly = Assembly.GetExecutingAssembly();
+        var input = JsonSerializer.Deserialize<TestCase[]>(
+            assembly.GetManifestResourceStream("SqlProcessorTestCases.json")!,
+            JsonSerializerOptions)!;
+
+        if (input is not null)
         {
-            new()
+            foreach (var testCase in input)
             {
-                Name = "Simple select",
-                Input = new TestCaseInput
+                if (DbSystemTestCasesToExecute.Contains(testCase.Input.DbSystemName))
                 {
-                    DbSystemName = "other_sql",
-                    Query = "SELECT * FROM Orders o, OrderDetails od",
-                },
-                Expected = new TestCaseExpected
-                {
-                    SanitizedQueryText = ["SELECT * FROM Orders o, OrderDetails od"],
-                    Summary = "SELECT Orders OrderDetails",
-                },
-            },
-            new()
+                    data.Add(testCase);
+                }
+            }
+        }
+
+        input = JsonSerializer.Deserialize<TestCase[]>(
+            assembly.GetManifestResourceStream("SqlProcessorAdditionalTestCases.json")!,
+            JsonSerializerOptions)!;
+
+        if (input is not null)
+        {
+            foreach (var testCase in input)
             {
-                Name = "Simple select with token in name",
-                Input = new TestCaseInput
+                if (DbSystemTestCasesToExecute.Contains(testCase.Input.DbSystemName))
                 {
-                    DbSystemName = "other_sql",
-                    Query = "SELECT * FROM SelectedData",
-                },
-                Expected = new TestCaseExpected
-                {
-                    SanitizedQueryText = ["SELECT * FROM SelectedData"],
-                    Summary = "SELECT SelectedData",
-                },
-            },
-        };
+                    data.Add(testCase);
+                }
+            }
+        }
 
         return data;
     }

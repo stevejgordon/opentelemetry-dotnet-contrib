@@ -20,10 +20,6 @@ internal static class SqlProcessor
 
     private static readonly string[] DdlStatements = ["CREATE", "ALTER", "DROP"];
 
-    private static ReadOnlySpan<char> SelectSpan => "SELECT".AsSpan();
-
-    private static ReadOnlySpan<char> FromSpan => "FROM".AsSpan();
-
     public static SqlStatementInfo GetSanitizedSql(string? sql)
     {
         if (sql == null)
@@ -73,18 +69,18 @@ internal static class SqlProcessor
 
         while (parsePosition < sql.Length)
         {
-            //if (SkipComment(sql, ref parsePosition))
-            //{
-            //    continue;
-            //}
+            if (SkipComment(sql, ref parsePosition))
+            {
+                continue;
+            }
 
-            //if (SanitizeStringLiteral(sql, ref parsePosition) ||
-            //    SanitizeHexLiteral(sql, ref parsePosition) ||
-            //    SanitizeNumericLiteral(sql, ref parsePosition))
-            //{
-            //    bufferSpan[sanitizedPosition++] = '?';
-            //    continue;
-            //}
+            if (SanitizeStringLiteral(sql, ref parsePosition) ||
+                SanitizeHexLiteral(sql, ref parsePosition) ||
+                SanitizeNumericLiteral(sql, ref parsePosition))
+            {
+                buffer[sanitizedPosition++] = '?';
+                continue;
+            }
 
             WriteToken(sql, ref parsePosition, buffer, ref sanitizedPosition, ref summaryPosition, ref captureNextTokenAsTarget, ref inFromClause);
         }
@@ -99,7 +95,7 @@ internal static class SqlProcessor
         return sqlStatementInfo;
     }
 
-    private static bool SkipComment(string sql, ref int index)
+    private static bool SkipComment(ReadOnlySpan<char> sql, ref int index)
     {
         var i = index;
         var ch = sql[i];
@@ -118,7 +114,7 @@ internal static class SqlProcessor
                 }
             }
 
-            index = i;
+            index = ++i;
             return true;
         }
 
@@ -135,14 +131,14 @@ internal static class SqlProcessor
                 }
             }
 
-            index = i;
+            index = ++i;
             return true;
         }
 
         return false;
     }
 
-    private static bool SanitizeStringLiteral(string sql, ref int index)
+    private static bool SanitizeStringLiteral(ReadOnlySpan<char> sql, ref int index)
     {
         var ch = sql[index];
         if (ch == '\'')
@@ -164,14 +160,14 @@ internal static class SqlProcessor
                 }
             }
 
-            index = i;
+            index = ++i;
             return true;
         }
 
         return false;
     }
 
-    private static bool SanitizeHexLiteral(string sql, ref int index)
+    private static bool SanitizeHexLiteral(ReadOnlySpan<char> sql, ref int index)
     {
         var i = index;
         var ch = sql[i];
@@ -197,14 +193,14 @@ internal static class SqlProcessor
                 break;
             }
 
-            index = i;
+            index = ++i;
             return true;
         }
 
         return false;
     }
 
-    private static bool SanitizeNumericLiteral(string sql, ref int index)
+    private static bool SanitizeNumericLiteral(ReadOnlySpan<char> sql, ref int index)
     {
         var i = index;
         var ch = sql[i];
@@ -259,7 +255,7 @@ internal static class SqlProcessor
                 break;
             }
 
-            index = i;
+            index = ++i;
             return true;
         }
 
@@ -371,6 +367,13 @@ internal static class SqlProcessor
                     inFromClause = clause[0] == 'F';
                     return;
                 }
+            }
+        }
+
+        foreach (var ddl in DdlStatements)
+        {
+            if (nextCharUpper == ddl[0] && remainingSql.Length >= ddl.Length)
+            {
             }
         }
 

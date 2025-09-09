@@ -1,0 +1,15 @@
+[
+  {
+    "name": "keyword_prefix_for_target",
+    "input": {
+      "db.system.name": "other_sql",
+      "query": "SELECT * FROM SelectedData"
+    },
+    "expected": {
+      "db.query.text": [
+        "SELECT * FROM SelectedData"
+      ],
+      "db.query.summary": "SELECT SelectedData"
+    }
+  }
+]
