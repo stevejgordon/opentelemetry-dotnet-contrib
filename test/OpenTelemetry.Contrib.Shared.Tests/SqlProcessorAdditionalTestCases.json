@@ -11,5 +11,18 @@
       ],
       "db.query.summary": "SELECT SelectedData"
     }
+  },
+  {
+    "name": "summary_truncated",
+    "input": {
+      "db.system.name": "other_sql",
+      "query": "SELECT * FROM Vecnzotjejucwitzgrfifscuevittljlnrlpbruvkezeptqciyvbjhsytmbucbhwttidayecnthaztxbyppbyztcqccedeirgkxzrfezjxfwbtuqxeusroqgbvulgmsvnelovkxqsaqmlogomkhtjuirzhaocxlrmerihnmwaelullionarkmxwdamhduwrbooknqsnilurutgyerxphokeqnnoumbpcfjtmqrbpukjllofiwaltyoawkp o, OrderDetails od"
+    },
+    "expected": {
+      "db.query.text": [
+        "SELECT * FROM Vecnzotjejucwitzgrfifscuevittljlnrlpbruvkezeptqciyvbjhsytmbucbhwttidayecnthaztxbyppbyztcqccedeirgkxzrfezjxfwbtuqxeusroqgbvulgmsvnelovkxqsaqmlogomkhtjuirzhaocxlrmerihnmwaelullionarkmxwdamhduwrbooknqsnilurutgyerxphokeqnnoumbpcfjtmqrbpukjllofiwaltyoawkp o, OrderDetails od"
+      ],
+      "db.query.summary": "SELECT Vecnzotjejucwitzgrfifscuevittljlnrlpbruvkezeptqciyvbjhsytmbucbhwttidayecnthaztxbyppbyztcqccedeirgkxzrfezjxfwbtuqxeusroqgbvulgmsvnelovkxqsaqmlogomkhtjuirzhaocxlrmerihnmwaelullionarkmxwdamhduwrbooknqsnilurutgyerxphokeqnnoumbpcfjtmqrbpukjllofiwaltyoaw"
+    }
   }
 ]

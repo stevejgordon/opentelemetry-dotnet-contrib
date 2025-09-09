@@ -305,7 +305,7 @@ internal static class SqlProcessor
 
             destination[sanitizedPosition++] = nextChar;
 
-            if (matchedStatement && isOperation)
+            if (matchedStatement && isOperation && summaryPosition < 255)
             {
                 var summaryDestination = destination.Slice(summaryStartIndex);
 
@@ -344,44 +344,51 @@ internal static class SqlProcessor
 
         var remainingSql = sql.Slice(parsePosition);
 
-        foreach (var operation in DmlStatements)
+        // Summary is truncated to max 255 characters.
+        // We can fast pass through any remaining SQL for sanitization only.
+        if (summaryPosition < 255)
         {
-            if (nextCharUpper == operation[0] && remainingSql.Length >= operation.Length)
+            foreach (var operation in DmlStatements)
             {
-                if (TryWritePotentialKeyword(sql, operation.AsSpan(), buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition))
+                if (nextCharUpper == operation[0] && remainingSql.Length >= operation.Length)
                 {
-                    captureNextTokenAsTarget = false;
-                    inFromClause = false;
-                    return;
+                    if (TryWritePotentialKeyword(sql, operation.AsSpan(), buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition))
+                    {
+                        captureNextTokenAsTarget = false;
+                        inFromClause = false;
+                        return;
+                    }
+                }
+            }
+
+            foreach (var clause in Clauses)
+            {
+                if (nextCharUpper == clause[0] && remainingSql.Length >= clause.Length)
+                {
+                    if (TryWritePotentialKeyword(sql, clause.AsSpan(), buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition, isOperation: false))
+                    {
+                        captureNextTokenAsTarget = true;
+                        inFromClause = clause[0] == 'F';
+                        return;
+                    }
+                }
+            }
+
+            foreach (var ddl in DdlStatements)
+            {
+                if (nextCharUpper == ddl[0] && remainingSql.Length >= ddl.Length)
+                {
                 }
             }
         }
 
-        foreach (var clause in Clauses)
-        {
-            if (nextCharUpper == clause[0] && remainingSql.Length >= clause.Length)
-            {
-                if (TryWritePotentialKeyword(sql, clause.AsSpan(), buffer, ref parsePosition, ref sanitizedPosition, ref summaryPosition, isOperation: false))
-                {
-                    captureNextTokenAsTarget = true;
-                    inFromClause = clause[0] == 'F';
-                    return;
-                }
-            }
-        }
-
-        foreach (var ddl in DdlStatements)
-        {
-            if (nextCharUpper == ddl[0] && remainingSql.Length >= ddl.Length)
-            {
-            }
-        }
+        var summaryStartIndex = buffer.Length / 2;
 
         if (char.IsLetter(nextChar) || nextChar == '_')
         {
-            if (captureNextTokenAsTarget)
+            if (captureNextTokenAsTarget && summaryPosition < 255)
             {
-                buffer.Slice(buffer.Length / 2)[summaryPosition++] = ' ';
+                buffer.Slice(summaryStartIndex)[summaryPosition++] = ' ';
             }
 
             while (parsePosition < sql.Length)
@@ -392,9 +399,9 @@ internal static class SqlProcessor
                 {
                     buffer[sanitizedPosition++] = nextChar;
 
-                    if (captureNextTokenAsTarget)
+                    if (captureNextTokenAsTarget && summaryPosition < 255)
                     {
-                        buffer.Slice(buffer.Length / 2)[summaryPosition++] = nextChar;
+                        buffer.Slice(summaryStartIndex)[summaryPosition++] = nextChar;
                     }
 
                     parsePosition++;
