@@ -20,6 +20,31 @@ internal static class SqlProcessor
 
     private static readonly string[] DdlStatements = ["CREATE", "ALTER", "DROP"];
 
+    // We can extend this in the future to include more keywords if needed.
+    // The keywords should be ordered by frequency of use to optimize performance.
+    private static readonly SqlKeywordInfo[] SqlKeywords =
+    [
+        new SqlKeywordInfo("SELECT", SqlKeyword.Select, captureInSummary: true),
+        new SqlKeywordInfo("INSERT", SqlKeyword.Insert, captureInSummary: true),
+        new SqlKeywordInfo("UPDATE", SqlKeyword.Update, captureInSummary: true),
+        new SqlKeywordInfo("DELETE", SqlKeyword.Delete, captureInSummary: true),
+        new SqlKeywordInfo("FROM", SqlKeyword.From, captureInSummary: false),
+        new SqlKeywordInfo("INTO", SqlKeyword.Into, captureInSummary: false),
+        new SqlKeywordInfo("JOIN", SqlKeyword.Join, captureInSummary: false),
+        new SqlKeywordInfo("CREATE", SqlKeyword.Create, captureInSummary: true),
+        new SqlKeywordInfo("ALTER", SqlKeyword.Alter, captureInSummary: true),
+        new SqlKeywordInfo("DROP", SqlKeyword.Drop, captureInSummary: true),
+        new SqlKeywordInfo("TABLE", SqlKeyword.Table, captureInSummary: false),
+        new SqlKeywordInfo("INDEX", SqlKeyword.Index, captureInSummary: false),
+        new SqlKeywordInfo("PROCEDURE", SqlKeyword.Procedure, captureInSummary: false),
+        new SqlKeywordInfo("VIEW", SqlKeyword.View, captureInSummary: false),
+        new SqlKeywordInfo("DATABASE", SqlKeyword.Database, captureInSummary: false),
+        new SqlKeywordInfo("TRIGGER", SqlKeyword.Trigger, captureInSummary: false),
+        new SqlKeywordInfo("UNIQUE", SqlKeyword.Unique, captureInSummary: false),
+        new SqlKeywordInfo("NONCLUSTERED", SqlKeyword.NonClustered, captureInSummary: false),
+        new SqlKeywordInfo("CLUSTERED", SqlKeyword.Clustered, captureInSummary: false),
+    ];
+
     private enum SqlKeyword
     {
         Unknown,
@@ -39,6 +64,9 @@ internal static class SqlProcessor
         View,
         Database,
         Trigger,
+        Unique,
+        NonClustered,
+        Clustered,
     }
 
     public static SqlStatementInfo GetSanitizedSql(string? sql)
@@ -88,6 +116,9 @@ internal static class SqlProcessor
             ParsePosition = 0,
             SanitizedPosition = 0,
             SummaryPosition = 0,
+            CaptureNextTokenAsTarget = false,
+            PreviousTokenWasKeyword = false,
+            KeywordHistory = stackalloc SqlKeyword[4],
         };
 
         while (state.ParsePosition < sql.Length)
@@ -105,12 +136,12 @@ internal static class SqlProcessor
                 continue;
             }
 
-            if (ProcessWhitespace(sql, buffer, ref state))
+            if (ParseWhitespace(sql, buffer, ref state))
             {
                 continue;
             }
 
-            WriteToken(sql, buffer, ref state);
+            ParseToken(sql, buffer, ref state);
         }
 
         var sqlStatementInfo = new SqlStatementInfo(
@@ -123,7 +154,7 @@ internal static class SqlProcessor
         return sqlStatementInfo;
     }
 
-    private static bool ProcessWhitespace(ReadOnlySpan<char> sql, Span<char> buffer, ref ParseState state)
+    private static bool ParseWhitespace(ReadOnlySpan<char> sql, Span<char> buffer, ref ParseState state)
     {
         var foundWhitespace = false;
 
@@ -317,7 +348,7 @@ internal static class SqlProcessor
         return false;
     }
 
-    private static void WriteToken(
+    private static void ParseToken(
         ReadOnlySpan<char> sql,
         Span<char> buffer,
         ref ParseState state)
@@ -480,12 +511,14 @@ internal static class SqlProcessor
 
         if (matchedStatement)
         {
-            state.PreviousKeyword = statement[0] switch
+            var keyword = statement[0] switch
             {
                 'S' => SqlKeyword.Select,
-                'I' when statement.Length > 2 && statement[1] == 'N' => SqlKeyword.Insert,
+                'I' when statement.Length > 3 && statement[1] == 'N' && statement[2] == 'S' => SqlKeyword.Insert,
+                'I' when statement.Length > 3 && statement[1] == 'N' && statement[2] == 'D' => SqlKeyword.Index,
                 'I' => SqlKeyword.Into,
-                'U' => SqlKeyword.Update,
+                'U' when statement.Length > 2 && statement[1] == 'P' => SqlKeyword.Update,
+                'U' => SqlKeyword.Unique,
                 'D' when statement.Length > 2 && statement[1] == 'E' => SqlKeyword.Delete,
                 'D' => SqlKeyword.Drop,
                 'F' => SqlKeyword.From,
@@ -494,16 +527,25 @@ internal static class SqlProcessor
                 'A' => SqlKeyword.Alter,
                 'P' => SqlKeyword.Procedure,
                 'V' => SqlKeyword.View,
-                'T' => SqlKeyword.Table,
+                'T' => SqlKeyword.Table, // TODO - Handle trigger
                 _ => SqlKeyword.Unknown,
             };
 
             state.PreviousTokenWasKeyword = true;
 
             state.CaptureNextTokenAsTarget =
-                state.PreviousKeyword == SqlKeyword.From ||
-                state.PreviousKeyword == SqlKeyword.Into ||
-                state.PreviousKeyword == SqlKeyword.Join;
+                keyword == SqlKeyword.From ||
+                keyword == SqlKeyword.Into ||
+                keyword == SqlKeyword.Join;
+
+            // Maintain a history of the last 4 keywords to handle identifying cases like "CREATE UNIQUE CLUSTERED INDEX"
+            // The keyword at the lowest index is the newest keyword
+            for (var i = state.KeywordHistory.Length - 1; i > 0; i--)
+            {
+                state.KeywordHistory[i] = state.KeywordHistory[i - 1];
+            }
+
+            state.KeywordHistory[0] = keyword;
         }
         else
         {
@@ -528,5 +570,23 @@ internal static class SqlProcessor
         public bool PreviousTokenWasKeyword { get; set; }
 
         public bool CaptureNextTokenAsTarget { get; set; }
+
+        public Span<SqlKeyword> KeywordHistory { get; set; }
+    }
+
+    private readonly struct SqlKeywordInfo
+    {
+        public SqlKeywordInfo(string keyword, SqlKeyword sqlKeyword, bool captureInSummary)
+        {
+            this.Keyword = keyword;
+            this.SqlKeyword = sqlKeyword;
+            this.IsOperation = captureInSummary;
+        }
+
+        public readonly string Keyword { get; }
+
+        public bool IsOperation { get; }
+
+        public SqlKeyword SqlKeyword { get; }
     }
 }
