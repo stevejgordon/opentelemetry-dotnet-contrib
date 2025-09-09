@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Buffers;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace OpenTelemetry.Instrumentation;
 
@@ -17,31 +16,16 @@ internal static class SqlProcessor
 
     // We can extend this in the future to include more keywords if needed.
     // The keywords should be ordered by frequency of use to optimize performance.
+    // This only includes keywords that are standalone or which are the first keyword in a chain.
     private static readonly SqlKeywordInfo[] SqlKeywords =
     [
         new SqlKeywordInfo("SELECT", SqlKeyword.Select, captureInSummary: true),
         new SqlKeywordInfo("INSERT", SqlKeyword.Insert, captureInSummary: true),
         new SqlKeywordInfo("UPDATE", SqlKeyword.Update, captureInSummary: true),
         new SqlKeywordInfo("DELETE", SqlKeyword.Delete, captureInSummary: true),
-
-        new SqlKeywordInfo("INTO", SqlKeyword.Into, captureInSummary: false),
-        new SqlKeywordInfo("JOIN", SqlKeyword.Join, captureInSummary: false),
         new SqlKeywordInfo("CREATE", SqlKeyword.Create, captureInSummary: true),
         new SqlKeywordInfo("ALTER", SqlKeyword.Alter, captureInSummary: true),
-        new SqlKeywordInfo("DROP", SqlKeyword.Drop, captureInSummary: true)
-    ];
-
-    private static readonly SqlKeywordInfo[] SecondarySqlKeywords =
-    [
-        new SqlKeywordInfo("TABLE", SqlKeyword.Table, captureInSummary: false),
-        new SqlKeywordInfo("INDEX", SqlKeyword.Index, captureInSummary: false),
-        new SqlKeywordInfo("PROCEDURE", SqlKeyword.Procedure, captureInSummary: false),
-        new SqlKeywordInfo("VIEW", SqlKeyword.View, captureInSummary: false),
-        new SqlKeywordInfo("DATABASE", SqlKeyword.Database, captureInSummary: false),
-        new SqlKeywordInfo("TRIGGER", SqlKeyword.Trigger, captureInSummary: false),
-        new SqlKeywordInfo("UNIQUE", SqlKeyword.Unique, captureInSummary: false),
-        new SqlKeywordInfo("NONCLUSTERED", SqlKeyword.NonClustered, captureInSummary: false),
-        new SqlKeywordInfo("CLUSTERED", SqlKeyword.Clustered, captureInSummary: false)
+        new SqlKeywordInfo("DROP", SqlKeyword.Drop, captureInSummary: true),
     ];
 
     private enum SqlKeyword
@@ -149,17 +133,19 @@ internal static class SqlProcessor
         Span<char> buffer,
         ref ParseState state)
     {
-        // Summary is truncated to max 255 characters. If the limit is reached skip keyword matching for faster copying to sanitized SQL only.
-        // Avoid comparing for keywords if the previous token was a keyword we expect to be followed by an identifier.
+        var previousKeyword = state.KeywordHistory[0];
+        var keywordInfo = SqlKeywordInfo.GetInfo(previousKeyword);
 
-        if (state.PreviousTokenWasKeyword && state.KeywordHistory[0] != SqlKeyword.From)
+        // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
+        if (state.SummaryPosition < 255 && !(state.PreviousTokenWasKeyword && keywordInfo.RequiresIdentifier))
         {
-
-        }
-
-        if (state.SummaryPosition < 255 && !(state.PreviousTokenWasKeyword && state.KeywordHistory[0] != SqlKeyword.From))
-        {
-            var previousKeyword = state.KeywordHistory[0];
+            if (previousKeyword is SqlKeyword.Select)
+            {
+                if (TryWritePotentialKeyword(sql, SqlKeywordInfo.FromKeyword, buffer, ref state))
+                {
+                    return;
+                }
+            }
 
             if (state.PreviousTokenWasKeyword && previousKeyword is SqlKeyword.Create)
             {
@@ -167,21 +153,20 @@ internal static class SqlProcessor
                 {
                     return;
                 }
-            }
 
-            if (previousKeyword is SqlKeyword.Select)
-            {
-                if (TryWritePotentialKeyword(sql, SqlKeywordInfo.FromKeyword, buffer, ref state))
+                if (TryWritePotentialKeyword(sql, SqlKeywordInfo.IndexKeyword, buffer, ref state))
                 {
                     return;
                 }
 
-                break;
+                // TODO - other scenarios like CREATE PROCEDURE, CREATE VIEW, CREATE DATABASE, CREATE TRIGGER
+
+                state.SummaryPosition -= SqlKeywordInfo.CreateKeyword.Keyword.Length;
             }
 
-            foreach (var keywordInfo in SqlKeywords)
+            foreach (var sqlKeyword in SqlKeywords)
             {
-                if (TryWritePotentialKeyword(sql, in keywordInfo, buffer, ref state))
+                if (TryWritePotentialKeyword(sql, in sqlKeyword, buffer, ref state))
                 {
                     return;
                 }
@@ -556,17 +541,18 @@ internal static class SqlProcessor
 
     private readonly struct SqlKeywordInfo
     {
-        public SqlKeywordInfo(string keyword, SqlKeyword sqlKeyword, bool captureInSummary = false, SqlKeywordInfo[]? followedByKeywords = null)
+        public SqlKeywordInfo(string keyword, SqlKeyword sqlKeyword, bool captureInSummary = false, bool requiresIdentifier = false, SqlKeywordInfo[]? followedByKeywords = null)
         {
             this.Keyword = keyword;
             this.SqlKeyword = sqlKeyword;
             this.CaptureInSummary = captureInSummary;
+            this.RequiresIdentifier = requiresIdentifier;
             this.FollowedByKeywords = followedByKeywords ?? [];
         }
 
         public static SqlKeywordInfo SelectKeyword { get; } = new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [DistinctKeyword]);
 
-        public static SqlKeywordInfo FromKeyword { get; } = new("FROM", SqlKeyword.From);
+        public static SqlKeywordInfo FromKeyword { get; } = new("FROM", SqlKeyword.From, requiresIdentifier: true);
 
         public static SqlKeywordInfo TableKeyword { get; } = new("TABLE", SqlKeyword.Table, captureInSummary: true);
 
@@ -584,8 +570,23 @@ internal static class SqlProcessor
 
         public bool CaptureInSummary { get; }
 
+        public bool RequiresIdentifier { get; }
+
         public SqlKeyword SqlKeyword { get; }
 
         public SqlKeywordInfo[] FollowedByKeywords { get; }
+
+        public static SqlKeywordInfo GetInfo(SqlKeyword sqlKeyword) => sqlKeyword switch
+        {
+            SqlKeyword.Select => SelectKeyword,
+            SqlKeyword.From => FromKeyword,
+            SqlKeyword.Table => TableKeyword,
+            SqlKeyword.Unique => UniqueKeyword,
+            SqlKeyword.Clustered => ClusteredKeyword,
+            SqlKeyword.Index => IndexKeyword,
+            SqlKeyword.Create => CreateKeyword,
+            SqlKeyword.Distinct => DistinctKeyword,
+            _ => new SqlKeywordInfo(string.Empty, SqlKeyword.Unknown),
+        };
     }
 }
