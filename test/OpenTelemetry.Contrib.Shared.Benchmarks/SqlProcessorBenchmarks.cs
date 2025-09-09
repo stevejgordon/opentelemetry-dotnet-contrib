@@ -6,6 +6,7 @@ using BenchmarkDotNet.Attributes;
 namespace OpenTelemetry.Instrumentation.Benchmarks;
 
 [MemoryDiagnoser]
+[InProcess]
 public class SqlProcessorBenchmarks
 {
     [Params("SELECT * FROM Orders o, OrderDetails od"/*, "SELECT order_date\nFROM   (SELECT *\nFROM   orders o\nJOIN customers c\nON o.customer_id = c.customer_id)"*/)]

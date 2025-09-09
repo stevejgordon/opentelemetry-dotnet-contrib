@@ -24,5 +24,18 @@
       ],
       "db.query.summary": "SELECT Vecnzotjejucwitzgrfifscuevittljlnrlpbruvkezeptqciyvbjhsytmbucbhwttidayecnthaztxbyppbyztcqccedeirgkxzrfezjxfwbtuqxeusroqgbvulgmsvnelovkxqsaqmlogomkhtjuirzhaocxlrmerihnmwaelullionarkmxwdamhduwrbooknqsnilurutgyerxphokeqnnoumbpcfjtmqrbpukjllofiwaltyoaw"
     }
+  },
+  {
+    "name": "create_unique_index",
+    "input": {
+      "db.system.name": "other_sql",
+      "query": "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
+    },
+    "expected": {
+      "db.query.text": [
+        "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
+      ],
+      "db.query.summary": "CREATE UNIQUE INDEX Employees"
+    }
   }
 ]
