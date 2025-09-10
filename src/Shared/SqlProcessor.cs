@@ -19,13 +19,13 @@ internal static class SqlProcessor
     // This only includes keywords that are standalone or which are the first keyword in a chain.
     private static readonly SqlKeywordInfo[] SqlKeywords =
     [
-        new SqlKeywordInfo("SELECT", SqlKeyword.Select, captureInSummary: true),
-        new SqlKeywordInfo("INSERT", SqlKeyword.Insert, captureInSummary: true),
-        new SqlKeywordInfo("UPDATE", SqlKeyword.Update, captureInSummary: true),
-        new SqlKeywordInfo("DELETE", SqlKeyword.Delete, captureInSummary: true),
-        new SqlKeywordInfo("CREATE", SqlKeyword.Create, captureInSummary: true),
-        new SqlKeywordInfo("ALTER", SqlKeyword.Alter, captureInSummary: true),
-        new SqlKeywordInfo("DROP", SqlKeyword.Drop, captureInSummary: true),
+        SqlKeywordInfo.SelectKeyword,
+        SqlKeywordInfo.InsertKeyword,
+        SqlKeywordInfo.UpdateKeyword,
+        SqlKeywordInfo.DeleteKeyword,
+        SqlKeywordInfo.CreateKeyword,
+        SqlKeywordInfo.AlterKeyword,
+        SqlKeywordInfo.DropKeyword,
     ];
 
     private enum SqlKeyword
@@ -541,6 +541,18 @@ internal static class SqlProcessor
         public static readonly SqlKeywordInfo SelectKeyword =
             new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [FromKeyword, DistinctKeyword]);
 
+        public static readonly SqlKeywordInfo IntoKeyword =
+            new("INTO", SqlKeyword.Into, captureInSummary: false, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo InsertKeyword =
+           new("INSERT", SqlKeyword.Insert, captureInSummary: true, followedByKeywords: [IntoKeyword]);
+
+        public static readonly SqlKeywordInfo UpdateKeyword =
+           new("UPDATE", SqlKeyword.Update, captureInSummary: true);
+
+        public static readonly SqlKeywordInfo DeleteKeyword =
+           new("DELETE", SqlKeyword.Delete, captureInSummary: true);
+
         public static readonly SqlKeywordInfo TableKeyword =
             new("TABLE", SqlKeyword.Table, captureInSummary: true, requiresIdentifier: true);
 
@@ -582,6 +594,9 @@ internal static class SqlProcessor
         public static readonly SqlKeywordInfo DropKeyword =
             new("DROP", SqlKeyword.Drop, captureInSummary: true, followedByKeywords: [TableKeyword, IndexKeyword]);
 
+        public static readonly SqlKeywordInfo AlterKeyword =
+            new("ALTER", SqlKeyword.Alter, captureInSummary: true, followedByKeywords: [TableKeyword]);
+
         public SqlKeywordInfo(
             string keyword,
             SqlKeyword sqlKeyword,
@@ -621,12 +636,34 @@ internal static class SqlProcessor
                     return ref UniqueKeyword;
                 case SqlKeyword.Clustered:
                     return ref ClusteredKeyword;
+                case SqlKeyword.NonClustered:
+                    return ref NonClusteredKeyword;
                 case SqlKeyword.Index:
                     return ref IndexKeyword;
                 case SqlKeyword.Create:
                     return ref CreateKeyword;
+                case SqlKeyword.Drop:
+                    return ref DropKeyword;
+                case SqlKeyword.Procedure:
+                    return ref ProcedureKeyword;
+                case SqlKeyword.View:
+                    return ref ViewKeyword;
+                case SqlKeyword.Trigger:
+                    return ref TriggerKeyword;
+                case SqlKeyword.On:
+                    return ref OnKeyword;
                 case SqlKeyword.Distinct:
                     return ref DistinctKeyword;
+                case SqlKeyword.Alter:
+                    return ref AlterKeyword;
+                case SqlKeyword.Insert:
+                    return ref InsertKeyword;
+                case SqlKeyword.Into:
+                    return ref IntoKeyword;
+                case SqlKeyword.Update:
+                    return ref UpdateKeyword;
+                case SqlKeyword.Delete:
+                    return ref DeleteKeyword;
                 default:
                     return ref UnknownKeyword;
             }
