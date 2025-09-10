@@ -51,6 +51,7 @@ internal static class SqlProcessor
         NonClustered,
         Clustered,
         Distinct,
+        On,
     }
 
     public static SqlStatementInfo GetSanitizedSql(string? sql)
@@ -134,7 +135,7 @@ internal static class SqlProcessor
         ref ParseState state)
     {
         var previousKeyword = state.KeywordHistory[0];
-        var keywordInfo = SqlKeywordInfo.GetInfo(previousKeyword);
+        ref readonly var keywordInfo = ref SqlKeywordInfo.GetInfo(previousKeyword);
 
         // As an optimization, we only compare for keywords if we haven't already captured 255 characters for the summary.
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
@@ -219,7 +220,7 @@ internal static class SqlProcessor
         ref ParseState state)
     {
         var sqlToCompare = sql.Slice(state.ParsePosition);
-        var keywordSpan = sqlKeywordInfo.Keyword.AsSpan();
+        var keywordSpan = sqlKeywordInfo.KeywordText.AsSpan();
 
         // Check for whitespace after the potential token.
         // Early exit if no whitespace is found.
@@ -287,17 +288,7 @@ internal static class SqlProcessor
         if (matchedStatement)
         {
             state.PreviousTokenWasKeyword = true;
-
-            var keyword = sqlKeywordInfo.SqlKeyword;
-
-            state.CaptureNextTokenAsTarget = keyword switch
-            {
-                SqlKeyword.From => true,
-                SqlKeyword.Into => true,
-                SqlKeyword.Join => true,
-                SqlKeyword.Table when state.KeywordHistory[0] == SqlKeyword.Create => true,
-                _ => false,
-            };
+            state.CaptureNextTokenAsTarget = sqlKeywordInfo.RequiresIdentifier;
 
             // Maintain a history of the last 4 keywords to handle identifying cases like "CREATE UNIQUE CLUSTERED INDEX"
             // The keyword at the lowest index is the newest keyword
@@ -306,7 +297,7 @@ internal static class SqlProcessor
                 state.KeywordHistory[i] = state.KeywordHistory[i - 1];
             }
 
-            state.KeywordHistory[0] = keyword;
+            state.KeywordHistory[0] = sqlKeywordInfo.SqlKeyword;
         }
         else
         {
@@ -527,59 +518,85 @@ internal static class SqlProcessor
 
         public bool CaptureNextTokenAsTarget { get; set; }
 
-        public Span<SqlKeyword> KeywordHistory { get; set; }
+        public Span<SqlKeyword> KeywordHistory { get; set; } = [];
     }
 
     private readonly struct SqlKeywordInfo
     {
+        // TODO - Benchmark if it's better to make this a class?
+
+        // Order matters here. If a keyword can be followed by another keyword, the field(s)
+        // it can be followed by should be declared first so that static initialization works.
+
+        // Use static readonly fields (not properties) so we can return by-ref without copying.
+        public static readonly SqlKeywordInfo UnknownKeyword =
+            new(string.Empty, SqlKeyword.Unknown);
+
+        public static readonly SqlKeywordInfo FromKeyword =
+            new("FROM", SqlKeyword.From, captureInSummary: false, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo DistinctKeyword =
+            new("DISTINCT", SqlKeyword.Distinct, captureInSummary: true, followedByKeywords: [FromKeyword]);
+
+        public static readonly SqlKeywordInfo SelectKeyword =
+            new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [FromKeyword, DistinctKeyword]);
+
+        public static readonly SqlKeywordInfo TableKeyword =
+            new("TABLE", SqlKeyword.Table, captureInSummary: true, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo OnKeyword =
+            new("ON", SqlKeyword.On, captureInSummary: false, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo IndexKeyword =
+            new("INDEX", SqlKeyword.Index, captureInSummary: true, followedByKeywords: [OnKeyword]);
+
+        public static readonly SqlKeywordInfo ClusteredKeyword =
+            new("CLUSTERED", SqlKeyword.Clustered, captureInSummary: true, followedByKeywords: [IndexKeyword]);
+
+        public static readonly SqlKeywordInfo NonClusteredKeyword =
+            new("NONCLUSTERED", SqlKeyword.NonClustered, captureInSummary: true, followedByKeywords: [IndexKeyword]);
+
+        public static readonly SqlKeywordInfo UniqueKeyword =
+            new(
+                "UNIQUE",
+                SqlKeyword.Unique,
+                captureInSummary: true,
+                followedByKeywords: [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
+
+        public static readonly SqlKeywordInfo TriggerKeyword =
+            new("TRIGGER", SqlKeyword.Trigger, captureInSummary: true, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo ViewKeyword =
+            new("VIEW", SqlKeyword.View, captureInSummary: true, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo ProcedureKeyword =
+            new("PROCEDURE", SqlKeyword.Procedure, captureInSummary: true, requiresIdentifier: true);
+
+        public static readonly SqlKeywordInfo CreateKeyword =
+            new(
+                "CREATE",
+                SqlKeyword.Create,
+                captureInSummary: true,
+                followedByKeywords: [TableKeyword, IndexKeyword, ViewKeyword, ProcedureKeyword, TriggerKeyword, UniqueKeyword]);
+
+        public static readonly SqlKeywordInfo DropKeyword =
+            new("DROP", SqlKeyword.Drop, captureInSummary: true, followedByKeywords: [TableKeyword, IndexKeyword]);
+
         public SqlKeywordInfo(
             string keyword,
             SqlKeyword sqlKeyword,
             bool captureInSummary = false,
             bool requiresIdentifier = false,
-            SqlKeywordInfo[]? proceededByKeywords = null,
             SqlKeywordInfo[]? followedByKeywords = null)
         {
-            this.Keyword = keyword;
+            this.KeywordText = keyword;
             this.SqlKeyword = sqlKeyword;
             this.CaptureInSummary = captureInSummary;
             this.RequiresIdentifier = requiresIdentifier;
             this.FollowedByKeywords = followedByKeywords ?? [];
         }
 
-        public static SqlKeywordInfo SelectKeyword { get; } =
-            new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [DistinctKeyword]);
-
-        public static SqlKeywordInfo FromKeyword { get; } =
-            new("FROM", SqlKeyword.From, requiresIdentifier: true);
-
-        public static SqlKeywordInfo TableKeyword { get; } =
-            new("TABLE", SqlKeyword.Table, captureInSummary: true);
-
-        public static SqlKeywordInfo UniqueKeyword { get; } =
-            new(
-                "UNIQUE",
-                SqlKeyword.Unique,
-                captureInSummary: true,
-                proceededByKeywords: [CreateKeyword],
-                followedByKeywords: [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
-
-        public static SqlKeywordInfo ClusteredKeyword { get; } =
-            new("CLUSTERED", SqlKeyword.Clustered, followedByKeywords: [IndexKeyword]);
-
-        public static SqlKeywordInfo NonClusteredKeyword { get; } =
-           new("NONCLUSTERED", SqlKeyword.NonClustered, followedByKeywords: [IndexKeyword]);
-
-        public static SqlKeywordInfo IndexKeyword { get; } =
-            new("INDEX", SqlKeyword.Index);
-
-        public static SqlKeywordInfo CreateKeyword { get; } =
-            new("CREATE", SqlKeyword.Create, captureInSummary: true, followedByKeywords: [TableKeyword, IndexKeyword, UniqueKeyword]);
-
-        public static SqlKeywordInfo DistinctKeyword { get; } =
-            new("DISTINCT", SqlKeyword.Distinct);
-
-        public string Keyword { get; }
+        public string KeywordText { get; }
 
         public bool CaptureInSummary { get; }
 
@@ -589,17 +606,30 @@ internal static class SqlProcessor
 
         public SqlKeywordInfo[] FollowedByKeywords { get; }
 
-        public static SqlKeywordInfo GetInfo(SqlKeyword sqlKeyword) => sqlKeyword switch
+        // Return by ref readonly to avoid copying the struct.
+        public static ref readonly SqlKeywordInfo GetInfo(SqlKeyword sqlKeyword)
         {
-            SqlKeyword.Select => SelectKeyword,
-            SqlKeyword.From => FromKeyword,
-            SqlKeyword.Table => TableKeyword,
-            SqlKeyword.Unique => UniqueKeyword,
-            SqlKeyword.Clustered => ClusteredKeyword,
-            SqlKeyword.Index => IndexKeyword,
-            SqlKeyword.Create => CreateKeyword,
-            SqlKeyword.Distinct => DistinctKeyword,
-            _ => new SqlKeywordInfo(string.Empty, SqlKeyword.Unknown),
-        };
+            switch (sqlKeyword)
+            {
+                case SqlKeyword.Select:
+                    return ref SelectKeyword;
+                case SqlKeyword.From:
+                    return ref FromKeyword;
+                case SqlKeyword.Table:
+                    return ref TableKeyword;
+                case SqlKeyword.Unique:
+                    return ref UniqueKeyword;
+                case SqlKeyword.Clustered:
+                    return ref ClusteredKeyword;
+                case SqlKeyword.Index:
+                    return ref IndexKeyword;
+                case SqlKeyword.Create:
+                    return ref CreateKeyword;
+                case SqlKeyword.Distinct:
+                    return ref DistinctKeyword;
+                default:
+                    return ref UnknownKeyword;
+            }
+        }
     }
 }

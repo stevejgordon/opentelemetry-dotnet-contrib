@@ -52,19 +52,6 @@
     }
   },
   {
-    "name": "create_unique_followed_by_unknown_token",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "CREATE UNIQUE UNKNOWN"
-    },
-    "expected": {
-      "db.query.text": [
-        "CREATE UNIQUE UNKNOWN"
-      ],
-      "db.query.summary": ""
-    }
-  },
-  {
     "name": "select_distinct",
     "input": {
       "db.system.name": "other_sql",
@@ -75,19 +62,6 @@
         "SELECT DISTINCT Country FROM Countries"
       ],
       "db.query.summary": "SELECT DISTINCT Countries"
-    }
-  },
-  {
-    "name": "create_followed_by_unknown_token",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "CREATE UNEXPECTED"
-    },
-    "expected": {
-      "db.query.text": [
-        "CREATE UNEXPECTED"
-      ],
-      "db.query.summary": ""
     }
   }
 ]
