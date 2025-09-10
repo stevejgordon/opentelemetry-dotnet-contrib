@@ -532,8 +532,11 @@ internal static class SqlProcessor
         public static readonly SqlKeywordInfo UnknownKeyword =
             new(string.Empty, SqlKeyword.Unknown);
 
+        public static readonly SqlKeywordInfo JoinKeyword =
+            new("JOIN", SqlKeyword.Join, captureInSummary: false, requiresIdentifier: true);
+
         public static readonly SqlKeywordInfo FromKeyword =
-            new("FROM", SqlKeyword.From, captureInSummary: false, requiresIdentifier: true);
+            new("FROM", SqlKeyword.From, captureInSummary: false, requiresIdentifier: true, followedByKeywords: [JoinKeyword]);
 
         public static readonly SqlKeywordInfo DistinctKeyword =
             new("DISTINCT", SqlKeyword.Distinct, captureInSummary: true, followedByKeywords: [FromKeyword]);
@@ -664,6 +667,8 @@ internal static class SqlProcessor
                     return ref UpdateKeyword;
                 case SqlKeyword.Delete:
                     return ref DeleteKeyword;
+                case SqlKeyword.Join:
+                    return ref JoinKeyword;
                 default:
                     return ref UnknownKeyword;
             }
