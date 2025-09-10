@@ -39,6 +39,32 @@
     }
   },
   {
+    "name": "create_unique_index",
+    "input": {
+      "db.system.name": "other_sql",
+      "query": "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
+    },
+    "expected": {
+      "db.query.text": [
+        "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
+      ],
+      "db.query.summary": "CREATE UNIQUE INDEX Employees"
+    }
+  },
+  {
+    "name": "create_unique_followed_by_unknown_token",
+    "input": {
+      "db.system.name": "other_sql",
+      "query": "CREATE UNIQUE UNKNOWN"
+    },
+    "expected": {
+      "db.query.text": [
+        "CREATE UNIQUE UNKNOWN"
+      ],
+      "db.query.summary": ""
+    }
+  },
+  {
     "name": "select_distinct",
     "input": {
       "db.system.name": "other_sql",

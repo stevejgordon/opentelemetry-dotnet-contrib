@@ -136,34 +136,25 @@ internal static class SqlProcessor
         var previousKeyword = state.KeywordHistory[0];
         var keywordInfo = SqlKeywordInfo.GetInfo(previousKeyword);
 
+        // As an optimization, we only compare for keywords if we haven't already captured 255 characters for the summary.
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
         if (state.SummaryPosition < 255 && !(state.PreviousTokenWasKeyword && keywordInfo.RequiresIdentifier))
         {
-            if (previousKeyword is SqlKeyword.Select)
+            // First check if the previous keyword may be the start of a keyword chain so we can reduce the
+            // number of comparisons we need to do.
+            if (keywordInfo.FollowedByKeywords.Length > 0)
             {
-                if (TryWritePotentialKeyword(sql, SqlKeywordInfo.FromKeyword, buffer, ref state))
+                foreach (var followedByKeyword in keywordInfo.FollowedByKeywords)
                 {
-                    return;
+                    if (TryWritePotentialKeyword(sql, followedByKeyword, buffer, ref state))
+                    {
+                        return;
+                    }
                 }
             }
 
-            if (state.PreviousTokenWasKeyword && previousKeyword is SqlKeyword.Create)
-            {
-                if (TryWritePotentialKeyword(sql, SqlKeywordInfo.TableKeyword, buffer, ref state))
-                {
-                    return;
-                }
-
-                if (TryWritePotentialKeyword(sql, SqlKeywordInfo.IndexKeyword, buffer, ref state))
-                {
-                    return;
-                }
-
-                // TODO - other scenarios like CREATE PROCEDURE, CREATE VIEW, CREATE DATABASE, CREATE TRIGGER
-
-                state.SummaryPosition -= SqlKeywordInfo.CreateKeyword.Keyword.Length;
-            }
-
+            // We didn't match any keywords in the chain, so we check all keywords that are standalone or
+            // which are the first keyword in a chain.
             foreach (var sqlKeyword in SqlKeywords)
             {
                 if (TryWritePotentialKeyword(sql, in sqlKeyword, buffer, ref state))
@@ -541,7 +532,13 @@ internal static class SqlProcessor
 
     private readonly struct SqlKeywordInfo
     {
-        public SqlKeywordInfo(string keyword, SqlKeyword sqlKeyword, bool captureInSummary = false, bool requiresIdentifier = false, SqlKeywordInfo[]? followedByKeywords = null)
+        public SqlKeywordInfo(
+            string keyword,
+            SqlKeyword sqlKeyword,
+            bool captureInSummary = false,
+            bool requiresIdentifier = false,
+            SqlKeywordInfo[]? proceededByKeywords = null,
+            SqlKeywordInfo[]? followedByKeywords = null)
         {
             this.Keyword = keyword;
             this.SqlKeyword = sqlKeyword;
@@ -550,21 +547,37 @@ internal static class SqlProcessor
             this.FollowedByKeywords = followedByKeywords ?? [];
         }
 
-        public static SqlKeywordInfo SelectKeyword { get; } = new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [DistinctKeyword]);
+        public static SqlKeywordInfo SelectKeyword { get; } =
+            new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [DistinctKeyword]);
 
-        public static SqlKeywordInfo FromKeyword { get; } = new("FROM", SqlKeyword.From, requiresIdentifier: true);
+        public static SqlKeywordInfo FromKeyword { get; } =
+            new("FROM", SqlKeyword.From, requiresIdentifier: true);
 
-        public static SqlKeywordInfo TableKeyword { get; } = new("TABLE", SqlKeyword.Table, captureInSummary: true);
+        public static SqlKeywordInfo TableKeyword { get; } =
+            new("TABLE", SqlKeyword.Table, captureInSummary: true);
 
-        public static SqlKeywordInfo UniqueKeyword { get; } = new("UNIQUE", SqlKeyword.Unique);
+        public static SqlKeywordInfo UniqueKeyword { get; } =
+            new(
+                "UNIQUE",
+                SqlKeyword.Unique,
+                captureInSummary: true,
+                proceededByKeywords: [CreateKeyword],
+                followedByKeywords: [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
 
-        public static SqlKeywordInfo ClusteredKeyword { get; } = new("CLUSTERED", SqlKeyword.Clustered);
+        public static SqlKeywordInfo ClusteredKeyword { get; } =
+            new("CLUSTERED", SqlKeyword.Clustered, followedByKeywords: [IndexKeyword]);
 
-        public static SqlKeywordInfo IndexKeyword { get; } = new("INDEX", SqlKeyword.Index);
+        public static SqlKeywordInfo NonClusteredKeyword { get; } =
+           new("NONCLUSTERED", SqlKeyword.NonClustered, followedByKeywords: [IndexKeyword]);
 
-        public static SqlKeywordInfo CreateKeyword { get; } = new("CREATE", SqlKeyword.Create, captureInSummary: true);
+        public static SqlKeywordInfo IndexKeyword { get; } =
+            new("INDEX", SqlKeyword.Index);
 
-        public static SqlKeywordInfo DistinctKeyword { get; } = new("DISTINCT", SqlKeyword.Distinct);
+        public static SqlKeywordInfo CreateKeyword { get; } =
+            new("CREATE", SqlKeyword.Create, captureInSummary: true, followedByKeywords: [TableKeyword, IndexKeyword, UniqueKeyword]);
+
+        public static SqlKeywordInfo DistinctKeyword { get; } =
+            new("DISTINCT", SqlKeyword.Distinct);
 
         public string Keyword { get; }
 
