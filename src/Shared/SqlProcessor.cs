@@ -18,7 +18,7 @@ internal static class SqlProcessor
 
     // We can extend this in the future to include more keywords if needed.
     // The keywords should be ordered by frequency of use to optimize performance.
-    // This only includes keywords that are standalone or which are the first keyword in a chain.
+    // This only includes keywords that are standalone or which are often the first keyword in a statement.
     private static readonly SqlKeywordInfo[] SqlKeywords =
     [
         SqlKeywordInfo.SelectKeyword,
@@ -60,6 +60,18 @@ internal static class SqlProcessor
         Clustered,
         Distinct,
         On,
+        Schema,
+        Function,
+        User,
+        Role,
+        Sequence,
+    }
+
+    private enum CaptureInSummary
+    {
+        Always,
+        FirstOnly,
+        Never,
     }
 
     public static SqlStatementInfo GetSanitizedSql(string? sql)
@@ -101,11 +113,10 @@ internal static class SqlProcessor
                 continue;
             }
 
-            if (SanitizeStringLiteral(sql, ref state) ||
-                SanitizeHexLiteral(sql, ref state) ||
-                SanitizeNumericLiteral(sql, ref state))
+            if (SanitizeStringLiteral(sql, buffer, ref state) ||
+                SanitizeHexLiteral(sql, buffer, ref state) ||
+                SanitizeNumericLiteral(sql, buffer, ref state))
             {
-                buffer[state.SanitizedPosition++] = '?';
                 continue;
             }
 
@@ -208,25 +219,36 @@ internal static class SqlProcessor
 
                 if (matchedKeyword)
                 {
-                    state.PreviousTokenWasKeyword = true;
-                    state.CaptureNextTokenAsNonKeyword = potentialKeywordInfo.FollowedByIdentifier;
-                    state.PreviousKeyword = potentialKeywordInfo;
-
                     sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
                     state.SanitizedPosition += keywordLength;
 
-                    if (potentialKeywordInfo.CaptureInSummary)
-                    {
-                        if (state.SummaryPosition > 0)
-                        {
-                            // Add a space before the keyword if it's not the first one
-                            state.SummaryBuffer[state.SummaryPosition++] = ' ';
-                        }
+                    // Some keywords are only captured in the summary if they appear at the start of the statement such
+                    // as CREATE, ALTER, DROP.
 
-                        sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
-                        state.SummaryPosition += keywordLength;
+                    // We only capture if we haven't already filled the summary to the max length of 255 and the keyword
+                    // may appear in the summary.
+                    if (state.SummaryPosition < 255 && potentialKeywordInfo.CaptureInSummary != CaptureInSummary.Never)
+                    {
+                        var isFirstKeyword = previousKeywordInfo.SqlKeyword == SqlKeyword.Unknown;
+
+                        // Check if the keyword should be captured in the summary based on whether it's the first keyword
+                        if ((isFirstKeyword && potentialKeywordInfo.CaptureInSummary is CaptureInSummary.FirstOnly or CaptureInSummary.Always)
+                            || (!isFirstKeyword && potentialKeywordInfo.CaptureInSummary is CaptureInSummary.Always))
+                        {
+                            if (state.SummaryPosition > 0)
+                            {
+                                // Add a space before the keyword if it's not the first one.
+                                state.SummaryBuffer[state.SummaryPosition++] = ' ';
+                            }
+
+                            sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
+                            state.SummaryPosition += keywordLength;
+                        }
                     }
 
+                    state.PreviousTokenWasKeyword = true;
+                    state.CaptureNextTokenAsNonKeyword = potentialKeywordInfo.FollowedByIdentifier;
+                    state.PreviousKeyword = potentialKeywordInfo;
                     state.ParsePosition += keywordLength;
 
                     // No further parsing needed for this token
@@ -401,10 +423,10 @@ internal static class SqlProcessor
         return false;
     }
 
-    private static bool SanitizeStringLiteral(ReadOnlySpan<char> sql, ref ParseState state)
+    private static bool SanitizeStringLiteral(ReadOnlySpan<char> sql, Span<char> buffer, ref ParseState state)
     {
-        var ch = sql[state.ParsePosition];
-        if (ch == '\'')
+        var nextChar = sql[state.ParsePosition];
+        if (nextChar == '\'')
         {
 #if NET
             var rest = sql.Slice(state.ParsePosition + 1);
@@ -425,30 +447,35 @@ internal static class SqlProcessor
                 }
 
                 // Found terminating quote
-                state.ParsePosition = (sql.Length - rest.Length) + idx + 1;
+                state.ParsePosition = sql.Length - rest.Length + idx + 1;
+
+                buffer[state.SanitizedPosition++] = '?';
                 return true;
             }
 
+            buffer[state.SanitizedPosition++] = '?';
             return true;
 #else
             var i = state.ParsePosition + 1;
             var length = sql.Length;
             for (; i < length; ++i)
             {
-                ch = sql[i];
-                if (ch == '\'' && i + 1 < length && sql[i + 1] == '\'')
+                nextChar = sql[i];
+                if (nextChar == '\'' && i + 1 < length && sql[i + 1] == '\'')
                 {
                     ++i;
                     continue;
                 }
 
-                if (ch == '\'')
+                if (nextChar == '\'')
                 {
                     break;
                 }
             }
 
             state.ParsePosition = ++i;
+
+            buffer[state.SanitizedPosition++] = '?';
             return true;
 #endif
         }
@@ -456,7 +483,7 @@ internal static class SqlProcessor
         return false;
     }
 
-    private static bool SanitizeHexLiteral(ReadOnlySpan<char> sql, ref ParseState state)
+    private static bool SanitizeHexLiteral(ReadOnlySpan<char> sql, Span<char> buffer, ref ParseState state)
     {
         var i = state.ParsePosition;
         var ch = sql[i];
@@ -483,52 +510,78 @@ internal static class SqlProcessor
             }
 
             state.ParsePosition = ++i;
+
+            buffer[state.SanitizedPosition++] = '?';
             return true;
         }
 
         return false;
     }
 
-    private static bool SanitizeNumericLiteral(ReadOnlySpan<char> sql, ref ParseState state)
+    private static bool SanitizeNumericLiteral(ReadOnlySpan<char> sql, Span<char> buffer, ref ParseState state)
     {
         var i = state.ParsePosition;
-        var ch = sql[i];
+        var nextChar = sql[i];
         var length = sql.Length;
 
+        // If the digit follows an open bracket, check for a parenthesized digit sequence
+        if (i > 0 && sql[i - 1] == '(' && char.IsDigit(nextChar))
+        {
+            int start = i;
+            int j = i;
+
+            // Scan until closing ')', ensure all are digits
+            while (j < length && char.IsDigit(sql[j]))
+            {
+                j++;
+            }
+
+            if (j < length && sql[j] == ')')
+            {
+                // Copy the digits and the closing bracket to the buffer
+                sql.Slice(start, j - start + 1).CopyTo(buffer.Slice(state.SanitizedPosition));
+                state.SanitizedPosition += j - start + 1;
+                state.ParsePosition = j + 1;
+                return true;
+            }
+
+            // If not a valid parenthesized digit sequence, fall through to normal logic
+        }
+
         // Scan past leading sign
-        if ((ch == '-' || ch == '+') && i + 1 < length && (char.IsDigit(sql[i + 1]) || sql[i + 1] == '.'))
+        if ((nextChar == '-' || nextChar == '+') && i + 1 < length && (char.IsDigit(sql[i + 1]) || sql[i + 1] == '.'))
         {
             i += 1;
-            ch = sql[i];
+            nextChar = sql[i];
         }
 
         // Scan past leading decimal point
         var periodMatched = false;
-        if (ch == '.' && i + 1 < length && char.IsDigit(sql[i + 1]))
+        if (nextChar == '.' && i + 1 < length && char.IsDigit(sql[i + 1]))
         {
             periodMatched = true;
             i += 1;
-            ch = sql[i];
+            nextChar = sql[i];
         }
 
-        if (char.IsDigit(ch))
+        if (char.IsDigit(nextChar))
         {
             var exponentMatched = false;
             for (i += 1; i < length; ++i)
             {
-                ch = sql[i];
-                if (char.IsDigit(ch))
+                nextChar = sql[i];
+                if (char.IsDigit(nextChar))
                 {
                     continue;
                 }
 
-                if (!periodMatched && ch == '.')
+                if (!periodMatched && nextChar == '.')
                 {
                     periodMatched = true;
                     continue;
                 }
 
-                if (!exponentMatched && (ch == 'e' || ch == 'E'))
+                if (!exponentMatched && (nextChar == 'e' || nextChar == 'E'))
                 {
                     // Scan past sign in exponent
                     if (i + 1 < length && (sql[i + 1] == '-' || sql[i + 1] == '+'))
@@ -545,6 +598,8 @@ internal static class SqlProcessor
             }
 
             state.ParsePosition = ++i;
+
+            buffer[state.SanitizedPosition++] = '?';
             return true;
         }
 
@@ -576,82 +631,98 @@ internal static class SqlProcessor
         // Order matters here. If a keyword can be followed by another keyword, the field(s)
         // it can be followed by should be declared first so that static initialization works.
 
-        // Use static readonly fields (not properties) so we can return by-ref without copying.
+        // Using static readonly fields (not properties) so we can return by-ref without copying.
         public static readonly SqlKeywordInfo UnknownKeyword =
             new(string.Empty, SqlKeyword.Unknown);
 
         public static readonly SqlKeywordInfo JoinKeyword =
-            new("JOIN", SqlKeyword.Join, captureInSummary: false, followedByIdentifier: true);
+            new("JOIN", SqlKeyword.Join, captureInSummary: CaptureInSummary.Never, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo FromKeyword =
-            new("FROM", SqlKeyword.From, captureInSummary: false, followedByIdentifier: true, followedByKeywords: [JoinKeyword]);
+            new("FROM", SqlKeyword.From, captureInSummary: CaptureInSummary.Never, followedByIdentifier: true, followedByKeywords: [JoinKeyword]);
 
         public static readonly SqlKeywordInfo DistinctKeyword =
-            new("DISTINCT", SqlKeyword.Distinct, captureInSummary: true, followedByKeywords: [FromKeyword]);
+            new("DISTINCT", SqlKeyword.Distinct, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: [FromKeyword]);
 
         public static readonly SqlKeywordInfo SelectKeyword =
-            new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [FromKeyword, DistinctKeyword]);
+            new("SELECT", SqlKeyword.Select, captureInSummary: CaptureInSummary.Always, followedByKeywords: [FromKeyword, DistinctKeyword]);
 
         public static readonly SqlKeywordInfo IntoKeyword =
-            new("INTO", SqlKeyword.Into, captureInSummary: false, followedByIdentifier: true);
+            new("INTO", SqlKeyword.Into, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo InsertKeyword =
-           new("INSERT", SqlKeyword.Insert, captureInSummary: true, followedByKeywords: [IntoKeyword]);
+           new("INSERT", SqlKeyword.Insert, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: [IntoKeyword]);
 
         public static readonly SqlKeywordInfo UpdateKeyword =
-           new("UPDATE", SqlKeyword.Update, captureInSummary: true);
+           new("UPDATE", SqlKeyword.Update, captureInSummary: CaptureInSummary.FirstOnly);
 
         public static readonly SqlKeywordInfo DeleteKeyword =
-           new("DELETE", SqlKeyword.Delete, captureInSummary: true);
+           new("DELETE", SqlKeyword.Delete, captureInSummary: CaptureInSummary.FirstOnly);
 
         public static readonly SqlKeywordInfo TableKeyword =
-            new("TABLE", SqlKeyword.Table, captureInSummary: true, followedByIdentifier: true);
+            new("TABLE", SqlKeyword.Table, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo OnKeyword =
-            new("ON", SqlKeyword.On, captureInSummary: false, followedByIdentifier: true);
+            new("ON", SqlKeyword.On, captureInSummary: CaptureInSummary.Never, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo IndexKeyword =
-            new("INDEX", SqlKeyword.Index, captureInSummary: true, followedByKeywords: [OnKeyword]);
+            new("INDEX", SqlKeyword.Index, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: [OnKeyword]);
 
         public static readonly SqlKeywordInfo ClusteredKeyword =
-            new("CLUSTERED", SqlKeyword.Clustered, captureInSummary: true, followedByKeywords: [IndexKeyword]);
+            new("CLUSTERED", SqlKeyword.Clustered, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: [IndexKeyword]);
 
         public static readonly SqlKeywordInfo NonClusteredKeyword =
-            new("NONCLUSTERED", SqlKeyword.NonClustered, captureInSummary: true, followedByKeywords: [IndexKeyword]);
+            new("NONCLUSTERED", SqlKeyword.NonClustered, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: [IndexKeyword]);
 
         public static readonly SqlKeywordInfo UniqueKeyword =
-            new(
-                "UNIQUE",
-                SqlKeyword.Unique,
-                captureInSummary: true,
-                followedByKeywords: [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
+            new("UNIQUE", SqlKeyword.Unique, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords:
+                [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
 
         public static readonly SqlKeywordInfo TriggerKeyword =
-            new("TRIGGER", SqlKeyword.Trigger, captureInSummary: true, followedByIdentifier: true);
+            new("TRIGGER", SqlKeyword.Trigger, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo ViewKeyword =
-            new("VIEW", SqlKeyword.View, captureInSummary: true, followedByIdentifier: true);
+            new("VIEW", SqlKeyword.View, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo ProcedureKeyword =
-            new("PROCEDURE", SqlKeyword.Procedure, captureInSummary: true, followedByIdentifier: true);
+            new("PROCEDURE", SqlKeyword.Procedure, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo DatabaseKeyword =
+            new("DATABASE", SqlKeyword.Database, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo SchemaKeyword =
+            new("SCHEMA", SqlKeyword.Schema, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo FunctionKeyword =
+            new("FUNCTION", SqlKeyword.Function, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo UserKeyword =
+            new("USER", SqlKeyword.User, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo RoleKeyword =
+            new("ROLE", SqlKeyword.Role, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo SequenceKeyword =
+            new("SEQUENCE", SqlKeyword.Sequence, captureInSummary: CaptureInSummary.FirstOnly, followedByIdentifier: true);
+
+        public static readonly SqlKeywordInfo[] DdlSubKeywords = [
+            TableKeyword, IndexKeyword, ViewKeyword, ProcedureKeyword, TriggerKeyword,
+            DatabaseKeyword, SchemaKeyword, FunctionKeyword, UserKeyword, RoleKeyword, SequenceKeyword
+        ];
 
         public static readonly SqlKeywordInfo CreateKeyword =
-            new(
-                "CREATE",
-                SqlKeyword.Create,
-                captureInSummary: true,
-                followedByKeywords: [TableKeyword, IndexKeyword, ViewKeyword, ProcedureKeyword, TriggerKeyword, UniqueKeyword]);
+            new("CREATE", SqlKeyword.Create, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: DdlSubKeywords);
 
         public static readonly SqlKeywordInfo DropKeyword =
-            new("DROP", SqlKeyword.Drop, captureInSummary: true, followedByKeywords: [TableKeyword, IndexKeyword]);
+            new("DROP", SqlKeyword.Drop, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: DdlSubKeywords);
 
         public static readonly SqlKeywordInfo AlterKeyword =
-            new("ALTER", SqlKeyword.Alter, captureInSummary: true, followedByKeywords: [TableKeyword]);
+            new("ALTER", SqlKeyword.Alter, captureInSummary: CaptureInSummary.FirstOnly, followedByKeywords: DdlSubKeywords);
 
         public SqlKeywordInfo(
             string keyword,
             SqlKeyword sqlKeyword,
-            bool captureInSummary = false,
+            CaptureInSummary captureInSummary = CaptureInSummary.Never,
             bool followedByIdentifier = false,
             SqlKeywordInfo[]? followedByKeywords = null)
         {
@@ -664,7 +735,7 @@ internal static class SqlProcessor
 
         public string KeywordText { get; }
 
-        public bool CaptureInSummary { get; }
+        public CaptureInSummary CaptureInSummary { get; }
 
         /// <summary>
         /// Gets a value indicating whether the previous keyword (or token) is expected to be followed by
