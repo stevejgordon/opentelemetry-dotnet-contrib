@@ -241,7 +241,7 @@
     },
     "expected": {
       "db.query.text": [
-        "ALTER TRIGGER trg_AfterInsert ON Employees AFTER INSERT AS BEGIN INSERT INTO AuditLog (EmployeeId, Action) SELECT Id, 'INSERT' FROM inserted; END;"
+        "ALTER TRIGGER trg_AfterInsert ON Employees AFTER INSERT AS BEGIN INSERT INTO AuditLog (EmployeeId, Action) SELECT Id, ? FROM inserted; END;"
       ],
       "db.query.summary": "ALTER TRIGGER trg_AfterInsert"
     }
