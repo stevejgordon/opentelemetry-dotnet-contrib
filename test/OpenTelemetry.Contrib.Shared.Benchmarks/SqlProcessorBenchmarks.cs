@@ -19,11 +19,6 @@ public class SqlProcessorBenchmarks
         "SELECT Col1, Col2, Col3, Col4, Col5 FROM VeryLongTableName_Sales2024_Q4, Another_Very_Long_Table_Name_Inventory")]
     public string Sql { get; set; } = string.Empty;
 
-    [Params(false)]
-    public bool CacheEnabled { get; set; }
-
-    public void Setup() => SqlProcessor.CacheCapacity = this.CacheEnabled ? 1000 : 0;
-
     [Benchmark]
     public void Simple() => SqlProcessor.GetSanitizedSql(this.Sql);
 }

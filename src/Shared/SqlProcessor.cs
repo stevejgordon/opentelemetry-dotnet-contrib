@@ -8,8 +8,7 @@ namespace OpenTelemetry.Instrumentation;
 
 internal static class SqlProcessor
 {
-    // Internal for benchmarking
-    internal static int CacheCapacity;
+    private const int CacheCapacity = 0;
 
     private static readonly ConcurrentDictionary<string, SqlStatementInfo> Cache = new();
 
@@ -76,12 +75,6 @@ internal static class SqlProcessor
         }
 
         sqlStatementInfo = SanitizeSql(sql.AsSpan());
-
-        // Capacity <= 0 disables caching
-        if (CacheCapacity <= 0)
-        {
-            return sqlStatementInfo;
-        }
 
         // Best-effort capacity guard; may slightly exceed under concurrency which is acceptable for this cache
         return Cache.Count >= CacheCapacity ? sqlStatementInfo : Cache.GetOrAdd(sql, sqlStatementInfo);
@@ -201,10 +194,12 @@ internal static class SqlProcessor
                 var initialSummaryPosition = state.SummaryPosition;
                 var matchedKeyword = true;
 
+                var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
+
                 // Compare the potential keyword in a case-insensitive manner
-                for (var charPos = 0; charPos < keywordLength; charPos++)
+                for (int charPos = 0; charPos < keywordLength; charPos++)
                 {
-                    if ((remainingSqlToParse[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
+                    if ((sqlToCopy[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
                     {
                         matchedKeyword = false;
                         break;
@@ -216,8 +211,6 @@ internal static class SqlProcessor
                     state.PreviousTokenWasKeyword = true;
                     state.CaptureNextTokenAsNonKeyword = potentialKeywordInfo.FollowedByIdentifier;
                     state.PreviousKeyword = potentialKeywordInfo;
-
-                    var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
 
                     sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
                     state.SanitizedPosition += keywordLength;
