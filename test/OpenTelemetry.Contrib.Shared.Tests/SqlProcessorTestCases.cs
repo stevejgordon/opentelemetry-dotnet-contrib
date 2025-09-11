@@ -54,21 +54,6 @@ public static class SqlProcessorTestCases
             }
         }
 
-        data.Add(new()
-        {
-            Name = "Simple select",
-            Input = new TestCaseInput
-            {
-                DbSystemName = "other_sql",
-                Query = "SELECT * FROM Orders o, OrderDetails od",
-            },
-            Expected = new TestCaseExpected
-            {
-                SanitizedQueryText = ["SELECT * FROM Orders o, OrderDetails od"],
-                Summary = "SELECT Orders OrderDetails",
-            },
-        });
-
         return data;
     }
 

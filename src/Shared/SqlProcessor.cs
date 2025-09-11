@@ -31,6 +31,12 @@ internal static class SqlProcessor
         SqlKeywordInfo.DropKeyword,
     ];
 
+    // This is a special case used when handling sub-queries in parentheses.
+    private static readonly SqlKeywordInfo[] SelectOnlyKeywordArray =
+    [
+        SqlKeywordInfo.SelectKeyword,
+    ];
+
     private enum SqlKeyword
     {
         Unknown,
@@ -90,7 +96,7 @@ internal static class SqlProcessor
 
         var buffer = rentedBuffer.AsSpan();
 
-        ParseState state = new(stackalloc SqlKeyword[4]);
+        ParseState state = default;
 
         // Precompute the summary buffer slice once and carry it via state to avoid repeated Span.Slice calls
         state.SummaryBuffer = buffer.Slice(rentedBuffer.Length / 2);
@@ -115,12 +121,12 @@ internal static class SqlProcessor
                 continue;
             }
 
-            ParseToken(sql, buffer, ref state);
+            ParseNextToken(sql, buffer, ref state);
         }
 
         var sqlStatementInfo = new SqlStatementInfo(
             buffer.Slice(0, state.SanitizedPosition).ToString(),
-            state.SummaryBuffer.Slice(0, state.SummaryPosition).ToString());
+            state.SummaryBuffer.Slice(0, Math.Min(state.SummaryPosition, 255)).ToString());
 
         // We don't clear the buffer as we know the content has been sanitized
         ArrayPool<char>.Shared.Return(rentedBuffer);
@@ -128,58 +134,118 @@ internal static class SqlProcessor
         return sqlStatementInfo;
     }
 
-    private static void ParseToken(
+    private static void ParseNextToken(
         ReadOnlySpan<char> sql,
         Span<char> buffer,
         ref ParseState state)
     {
-        var previousKeyword = state.KeywordHistory[0];
-        ref readonly var keywordInfo = ref SqlKeywordInfo.GetInfo(previousKeyword);
+        ref readonly var previousKeywordInfo = ref state.PreviousKeyword;
+
+        state.PreviousTokenWasKeyword = false;
+
+        var nextChar = sql[state.ParsePosition];
+
+        // Quick first-character filter: only attempt keyword matching if the current char is an ASCII letter
+        var lower = (char)(nextChar | 0x20);
+        var canBeKeyword = lower >= 'a' && lower <= 'z';
 
         // As an optimization, we only compare for keywords if we haven't already captured 255 characters for the summary.
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
-        if (state.SummaryPosition < 255 && !(state.PreviousTokenWasKeyword && keywordInfo.RequiresIdentifier))
+        if (canBeKeyword && !state.CaptureNextTokenAsNonKeyword)
         {
-            // Quick first-character filter: only attempt keyword matching if the current char is an ASCII letter
-            var c = sql[state.ParsePosition];
-            var lower = (char)(c | 0x20);
-            var canBeKeyword = lower >= 'a' && lower <= 'z';
+            ReadOnlySpan<SqlKeywordInfo> keywordsToCheck;
 
-            if (canBeKeyword)
+            // Check if previous character is '(', in which case, we only check against the SELECT keyword.
+            // Otherwise, check if the previous keyword may be the start of a keyword chain so we can limit the
+            // number of keyword comparisons we need to do by only comparing for tokens we expect to appear next.
+            if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(' && canBeKeyword)
             {
-                // First check if the previous keyword may be the start of a keyword chain so we can reduce the
-                // number of comparisons we need to do.
-                if (keywordInfo.FollowedByKeywords.Length > 0)
+                keywordsToCheck = SelectOnlyKeywordArray;
+            }
+            else
+            {
+                keywordsToCheck = previousKeywordInfo.FollowedByKeywords?.Length > 0
+                    ? (ReadOnlySpan<SqlKeywordInfo>)previousKeywordInfo.FollowedByKeywords
+                    : (ReadOnlySpan<SqlKeywordInfo>)SqlKeywords;
+            }
+
+            for (int i = 0; i < keywordsToCheck.Length; i++)
+            {
+                var potentialKeywordInfo = keywordsToCheck[i];
+                var remainingSqlToParse = sql.Slice(state.ParsePosition);
+                var keywordSpan = potentialKeywordInfo.KeywordText.AsSpan();
+                var keywordLength = keywordSpan.Length;
+
+                // If the remaining SQL length is less than the keyword length
+                // it can't possibly match.
+                if (remainingSqlToParse.Length < keywordLength)
                 {
-                    foreach (var followedByKeyword in keywordInfo.FollowedByKeywords)
+                    continue;
+                }
+
+                // Check for whitespace after the potential token.
+                // Early exit if no whitespace is found.
+                if (remainingSqlToParse.Length > keywordLength)
+                {
+#if NET
+                    if (!WhitespaceSearchValues.Contains(remainingSqlToParse[keywordLength]))
+#else
+                    var charAfterKeyword = remainingSqlToParse[keywordLength];
+                    if (charAfterKeyword != ' ' && charAfterKeyword != '\t' && charAfterKeyword != '\r' && charAfterKeyword != '\n')
+#endif
                     {
-                        if (TryWritePotentialKeyword(sql, followedByKeyword, buffer, ref state))
-                        {
-                            return;
-                        }
+                        continue;
                     }
                 }
 
-                // We didn't match any keywords in the chain, so we check all keywords that are standalone or
-                // which are the first keyword in a chain.
-                foreach (var sqlKeyword in SqlKeywords)
+                var initialSummaryPosition = state.SummaryPosition;
+                var matchedKeyword = true;
+
+                // Compare the potential keyword in a case-insensitive manner
+                for (var charPos = 0; charPos < keywordLength; charPos++)
                 {
-                    if (TryWritePotentialKeyword(sql, in sqlKeyword, buffer, ref state))
+                    if ((remainingSqlToParse[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
                     {
-                        return;
+                        matchedKeyword = false;
+                        break;
                     }
+                }
+
+                if (matchedKeyword)
+                {
+                    state.PreviousTokenWasKeyword = true;
+                    state.CaptureNextTokenAsNonKeyword = potentialKeywordInfo.FollowedByIdentifier;
+                    state.PreviousKeyword = potentialKeywordInfo;
+
+                    var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
+
+                    sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
+                    state.SanitizedPosition += keywordLength;
+
+                    if (potentialKeywordInfo.CaptureInSummary)
+                    {
+                        if (state.SummaryPosition > 0)
+                        {
+                            // Add a space before the keyword if it's not the first one
+                            state.SummaryBuffer[state.SummaryPosition++] = ' ';
+                        }
+
+                        sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
+                        state.SummaryPosition += keywordLength;
+                    }
+
+                    state.ParsePosition += keywordLength;
+
+                    // No further parsing needed for this token
+                    return;
                 }
             }
         }
 
         // If we get this far, we have not matched a keyword, so we copy the token as-is
-        state.PreviousTokenWasKeyword = false;
-
-        var nextChar = sql[state.ParsePosition];
-
         if (char.IsLetter(nextChar) || nextChar == '_')
         {
-            if (state.CaptureNextTokenAsTarget && state.SummaryPosition < 255)
+            if (state.CaptureNextTokenAsNonKeyword && state.SummaryPosition < 255)
             {
                 state.SummaryBuffer[state.SummaryPosition++] = ' ';
             }
@@ -207,126 +273,26 @@ internal static class SqlProcessor
                 state.SanitizedPosition += length;
 
                 // Optionally copy to summary buffer
-                if (state.CaptureNextTokenAsTarget && state.SummaryPosition < 255)
+                if (state.CaptureNextTokenAsNonKeyword && state.SummaryPosition < 255)
                 {
-                    var remaining = 255 - state.SummaryPosition;
-                    var toCopy = length > remaining ? remaining : length;
-                    sql.Slice(start, toCopy).CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
-                    state.SummaryPosition += toCopy;
+                    // We may copy paste 255 here which is fine as we slice to max 255 when creating the final string
+                    sql.Slice(start, length).CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
+                    state.SummaryPosition += length;
                 }
             }
 
             state.ParsePosition = i;
-            state.CaptureNextTokenAsTarget = false;
+            state.CaptureNextTokenAsNonKeyword = false;
         }
         else
         {
-            if (state.KeywordHistory[0] == SqlKeyword.From && nextChar == ',')
-            {
-                state.CaptureNextTokenAsTarget = true;
-            }
+            state.CaptureNextTokenAsNonKeyword =
+                (state.PreviousKeyword.SqlKeyword == SqlKeyword.From && nextChar == ',') ||
+                (state.PreviousKeyword.SqlKeyword == SqlKeyword.On && nextChar == '=');
 
             buffer[state.SanitizedPosition++] = nextChar;
             state.ParsePosition++;
         }
-    }
-
-    private static bool TryWritePotentialKeyword(
-        ReadOnlySpan<char> sql,
-        in SqlKeywordInfo sqlKeywordInfo,
-        Span<char> destination,
-        ref ParseState state)
-    {
-        var sqlToCompare = sql.Slice(state.ParsePosition);
-        var keywordSpan = sqlKeywordInfo.KeywordText.AsSpan();
-
-        // if (sqlToCompare.Length < keywordSpan.Length)
-        // {
-        //    state.PreviousTokenWasKeyword = false;
-        //    return false;
-        // }
-
-        // Check for whitespace after the potential token.
-        // Early exit if no whitespace is found.
-        if (sqlToCompare.Length > keywordSpan.Length)
-        {
-#if NET
-            if (!WhitespaceSearchValues.Contains(sqlToCompare[keywordSpan.Length]))
-#else
-            var nextChar = sqlToCompare[keywordSpan.Length];
-            if (nextChar != ' ' && nextChar != '\t' && nextChar != '\r' && nextChar != '\n')
-#endif
-            {
-                state.PreviousTokenWasKeyword = false;
-                return false;
-            }
-        }
-
-        var compareIndex = -1;
-        var matchedStatement = true;
-        var initialSummaryPosition = state.SummaryPosition;
-
-        while (++compareIndex < keywordSpan.Length)
-        {
-            var nextChar = sqlToCompare[compareIndex];
-
-            // Optimized, case insensitive comparison
-            if ((nextChar | 0x20) != (keywordSpan[compareIndex] | 0x20))
-            {
-                if (compareIndex == 0)
-                {
-                    // We didn't match the first character, so we return false immediately
-                    state.PreviousTokenWasKeyword = false;
-                    return false;
-                }
-
-                // We didn't match the statement, so we stop comparing
-                // We don't return here as we may need to rewind any summary we may have written
-                matchedStatement = false;
-                break;
-            }
-
-            // Copy the character to the sanitized SQL within the buffer
-            destination[state.SanitizedPosition++] = nextChar;
-
-            // Truncate the summary at 255 characters
-            if (matchedStatement && sqlKeywordInfo.CaptureInSummary && state.SummaryPosition < 255)
-            {
-                // Add a space before the keyword if it's not the first token in the summary
-                if (compareIndex == 0 && state.SummaryPosition > 0)
-                {
-                    state.SummaryBuffer[state.SummaryPosition++] = ' ';
-                }
-
-                // Copy the character to the summary SQL within the buffer
-                state.SummaryBuffer[state.SummaryPosition++] = nextChar;
-            }
-
-            state.ParsePosition++;
-        }
-
-        if (matchedStatement)
-        {
-            state.PreviousTokenWasKeyword = true;
-            state.CaptureNextTokenAsTarget = sqlKeywordInfo.RequiresIdentifier;
-
-            // Maintain a history of the last 4 keywords to handle identifying cases like "CREATE UNIQUE CLUSTERED INDEX"
-            // The keyword at the lowest index is the newest keyword
-            for (var i = state.KeywordHistory.Length - 1; i > 0; i--)
-            {
-                state.KeywordHistory[i] = state.KeywordHistory[i - 1];
-            }
-
-            state.KeywordHistory[0] = sqlKeywordInfo.SqlKeyword;
-        }
-        else
-        {
-            // Rewind the summary position if we didn't match a keyword while copying
-            state.SummaryPosition = initialSummaryPosition;
-            state.PreviousTokenWasKeyword = false;
-        }
-
-        return matchedStatement;
     }
 
     private static bool ParseWhitespace(ReadOnlySpan<char> sql, Span<char> buffer, ref ParseState state)
@@ -597,25 +563,19 @@ internal static class SqlProcessor
         // NOTE: ParseState intentionally uses public fields (not properties).
         // - This is a ref struct that lives on the stack and is passed by ref through hot paths.
         // - Fields avoid property accessor calls in tight loops and yield smaller/faster code after inlining.
-        // - Grouping Span<> fields first helps layout and may reduce padding on x64.
+        // - Grouping Span<> and larger struct fields first helps layout and may reduce padding on x64.
         // - Keeping the struct simple and flat minimizes stack pressure and lets the JIT keep values in registers.
         // If you add members, keep spans first, then ints, then bools, to preserve a compact layout.
 
         public Span<char> SummaryBuffer;
-        public Span<SqlKeyword> KeywordHistory;
+        public SqlKeywordInfo PreviousKeyword;
 
         public int ParsePosition;
         public int SanitizedPosition;
         public int SummaryPosition;
 
         public bool PreviousTokenWasKeyword;
-        public bool CaptureNextTokenAsTarget;
-
-        public ParseState(Span<SqlKeyword> historyBuffer)
-        {
-            this = default;
-            this.KeywordHistory = historyBuffer;
-        }
+        public bool CaptureNextTokenAsNonKeyword;
     }
 
     private readonly struct SqlKeywordInfo
@@ -628,10 +588,10 @@ internal static class SqlProcessor
             new(string.Empty, SqlKeyword.Unknown);
 
         public static readonly SqlKeywordInfo JoinKeyword =
-            new("JOIN", SqlKeyword.Join, captureInSummary: false, requiresIdentifier: true);
+            new("JOIN", SqlKeyword.Join, captureInSummary: false, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo FromKeyword =
-            new("FROM", SqlKeyword.From, captureInSummary: false, requiresIdentifier: true, followedByKeywords: [JoinKeyword]);
+            new("FROM", SqlKeyword.From, captureInSummary: false, followedByIdentifier: true, followedByKeywords: [JoinKeyword]);
 
         public static readonly SqlKeywordInfo DistinctKeyword =
             new("DISTINCT", SqlKeyword.Distinct, captureInSummary: true, followedByKeywords: [FromKeyword]);
@@ -640,7 +600,7 @@ internal static class SqlProcessor
             new("SELECT", SqlKeyword.Select, captureInSummary: true, followedByKeywords: [FromKeyword, DistinctKeyword]);
 
         public static readonly SqlKeywordInfo IntoKeyword =
-            new("INTO", SqlKeyword.Into, captureInSummary: false, requiresIdentifier: true);
+            new("INTO", SqlKeyword.Into, captureInSummary: false, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo InsertKeyword =
            new("INSERT", SqlKeyword.Insert, captureInSummary: true, followedByKeywords: [IntoKeyword]);
@@ -652,10 +612,10 @@ internal static class SqlProcessor
            new("DELETE", SqlKeyword.Delete, captureInSummary: true);
 
         public static readonly SqlKeywordInfo TableKeyword =
-            new("TABLE", SqlKeyword.Table, captureInSummary: true, requiresIdentifier: true);
+            new("TABLE", SqlKeyword.Table, captureInSummary: true, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo OnKeyword =
-            new("ON", SqlKeyword.On, captureInSummary: false, requiresIdentifier: true);
+            new("ON", SqlKeyword.On, captureInSummary: false, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo IndexKeyword =
             new("INDEX", SqlKeyword.Index, captureInSummary: true, followedByKeywords: [OnKeyword]);
@@ -674,13 +634,13 @@ internal static class SqlProcessor
                 followedByKeywords: [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
 
         public static readonly SqlKeywordInfo TriggerKeyword =
-            new("TRIGGER", SqlKeyword.Trigger, captureInSummary: true, requiresIdentifier: true);
+            new("TRIGGER", SqlKeyword.Trigger, captureInSummary: true, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo ViewKeyword =
-            new("VIEW", SqlKeyword.View, captureInSummary: true, requiresIdentifier: true);
+            new("VIEW", SqlKeyword.View, captureInSummary: true, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo ProcedureKeyword =
-            new("PROCEDURE", SqlKeyword.Procedure, captureInSummary: true, requiresIdentifier: true);
+            new("PROCEDURE", SqlKeyword.Procedure, captureInSummary: true, followedByIdentifier: true);
 
         public static readonly SqlKeywordInfo CreateKeyword =
             new(
@@ -699,13 +659,13 @@ internal static class SqlProcessor
             string keyword,
             SqlKeyword sqlKeyword,
             bool captureInSummary = false,
-            bool requiresIdentifier = false,
+            bool followedByIdentifier = false,
             SqlKeywordInfo[]? followedByKeywords = null)
         {
             this.KeywordText = keyword;
             this.SqlKeyword = sqlKeyword;
             this.CaptureInSummary = captureInSummary;
-            this.RequiresIdentifier = requiresIdentifier;
+            this.FollowedByIdentifier = followedByIdentifier;
             this.FollowedByKeywords = followedByKeywords ?? [];
         }
 
@@ -713,7 +673,11 @@ internal static class SqlProcessor
 
         public bool CaptureInSummary { get; }
 
-        public bool RequiresIdentifier { get; }
+        /// <summary>
+        /// Gets a value indicating whether the previous keyword (or token) is expected to be followed by
+        /// an identifier (e.g. table name). When set, we can optimize parsing by skipping keyword comparisons.
+        /// </summary>
+        public bool FollowedByIdentifier { get; }
 
         public SqlKeyword SqlKeyword { get; }
 
