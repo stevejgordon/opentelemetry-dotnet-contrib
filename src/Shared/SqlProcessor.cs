@@ -104,13 +104,34 @@ internal static class SqlProcessor
         }
 
         // If another thread added meanwhile, return the cached value if available.
-        if (Cache.TryGetValue(sql, out var existing))
-        {
-            return existing;
-        }
-
-        return sqlStatementInfo;
+        return Cache.TryGetValue(sql, out var existing) ? existing : sqlStatementInfo;
     }
+
+#if !NET
+    // Private helpers (kept after public methods to satisfy analyzers)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsAsciiLetter(char c)
+    {
+        var lower = (char)(c | 0x20);
+        return lower >= 'a' && lower <= 'z';
+    }
+#endif
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsAsciiDigit(char c) =>
+#if NET
+        char.IsAsciiDigit(c);
+#else
+        c >= '0' && c <= '9';
+#endif
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsAsciiIdentifierChar(char c) =>
+#if NET
+        char.IsAsciiLetter(c) || char.IsAsciiDigit(c) || c == '_' || c == '.';
+#else
+        IsAsciiLetter(c) || IsAsciiDigit(c) || c == '_' || c == '.';
+#endif
 
     private static SqlStatementInfo SanitizeSql(ReadOnlySpan<char> sql)
     {
@@ -176,8 +197,11 @@ internal static class SqlProcessor
         var nextChar = sql[state.ParsePosition];
 
         // Quick first-character filter: only attempt keyword matching if the current char is an ASCII letter
-        var lower = (char)(nextChar | 0x20);
-        var mayBeKeyword = lower >= 'a' && lower <= 'z';
+#if NET
+        var mayBeKeyword = char.IsAsciiLetter(nextChar);
+#else
+        var mayBeKeyword = IsAsciiLetter(nextChar);
+#endif
 
         // As an optimization, we only compare for keywords if we haven't already captured 255 characters for the summary.
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
@@ -213,6 +237,12 @@ internal static class SqlProcessor
                     continue;
                 }
 
+                // First-letter quick check to reduce comparisons early
+                if ((remainingSqlToParse[0] | 0x20) != (keywordSpan[0] | 0x20))
+                {
+                    continue;
+                }
+
                 // Check for whitespace after the potential token.
                 // Early exit if no whitespace is found.
                 if (remainingSqlToParse.Length > keywordLength)
@@ -228,13 +258,12 @@ internal static class SqlProcessor
                     }
                 }
 
-                var initialSummaryPosition = state.SummaryPosition;
                 var matchedKeyword = true;
 
                 var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
 
                 // Compare the potential keyword in a case-insensitive manner
-                for (int charPos = 0; charPos < keywordLength; charPos++)
+                for (int charPos = 1; charPos < keywordLength; charPos++)
                 {
                     if ((sqlToCopy[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
                     {
@@ -288,7 +317,7 @@ internal static class SqlProcessor
             while (i < sql.Length)
             {
                 var ch = sql[i];
-                if (char.IsLetter(ch) || ch == '_' || ch == '.' || char.IsDigit(ch))
+                if (IsAsciiIdentifierChar(ch))
                 {
                     i++;
                     continue;
@@ -515,7 +544,13 @@ internal static class SqlProcessor
             for (i += 2; i < length; ++i)
             {
                 ch = sql[i];
-                if (char.IsDigit(ch) ||
+#if NET
+                if (char.IsAsciiHexDigit(ch))
+                {
+                    continue;
+                }
+#else
+                if (IsAsciiDigit(ch) ||
                     ch == 'A' || ch == 'a' ||
                     ch == 'B' || ch == 'b' ||
                     ch == 'C' || ch == 'c' ||
@@ -525,6 +560,7 @@ internal static class SqlProcessor
                 {
                     continue;
                 }
+#endif
 
                 i -= 1;
                 break;
@@ -546,13 +582,14 @@ internal static class SqlProcessor
         var length = sql.Length;
 
         // If the digit follows an open bracket, check for a parenthesized digit sequence
-        if (i > 0 && sql[i - 1] == '(' && char.IsDigit(nextChar))
+        if (i > 0 && sql[i - 1] == '('
+            && IsAsciiDigit(nextChar))
         {
             int start = i;
             int j = i;
 
             // Scan until closing ')', ensure all are digits
-            while (j < length && char.IsDigit(sql[j]))
+            while (j < length && IsAsciiDigit(sql[j]))
             {
                 j++;
             }
@@ -570,7 +607,7 @@ internal static class SqlProcessor
         }
 
         // Scan past leading sign
-        if ((nextChar == '-' || nextChar == '+') && i + 1 < length && (char.IsDigit(sql[i + 1]) || sql[i + 1] == '.'))
+        if ((nextChar == '-' || nextChar == '+') && i + 1 < length && (IsAsciiDigit(sql[i + 1]) || sql[i + 1] == '.'))
         {
             i += 1;
             nextChar = sql[i];
@@ -578,20 +615,20 @@ internal static class SqlProcessor
 
         // Scan past leading decimal point
         var periodMatched = false;
-        if (nextChar == '.' && i + 1 < length && char.IsDigit(sql[i + 1]))
+        if (nextChar == '.' && i + 1 < length && IsAsciiDigit(sql[i + 1]))
         {
             periodMatched = true;
             i += 1;
             nextChar = sql[i];
         }
 
-        if (char.IsDigit(nextChar))
+        if (IsAsciiDigit(nextChar))
         {
             var exponentMatched = false;
             for (i += 1; i < length; ++i)
             {
                 nextChar = sql[i];
-                if (char.IsDigit(nextChar))
+                if (IsAsciiDigit(nextChar))
                 {
                     continue;
                 }
