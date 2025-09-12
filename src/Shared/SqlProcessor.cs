@@ -148,7 +148,7 @@ internal static class SqlProcessor
         Span<char> buffer,
         ref ParseState state)
     {
-        ref readonly var previousKeywordInfo = ref state.PreviousParsedKeyword;
+        var previousKeywordInfo = state.PreviousParsedKeyword;
 
         var nextChar = sql[state.ParsePosition];
 
@@ -171,7 +171,7 @@ internal static class SqlProcessor
             }
             else
             {
-                keywordsToCheck = previousKeywordInfo.FollowedByKeywords?.Length > 0
+                keywordsToCheck = previousKeywordInfo != null && previousKeywordInfo.FollowedByKeywords.Length > 0
                     ? (ReadOnlySpan<SqlKeywordInfo>)previousKeywordInfo.FollowedByKeywords
                     : (ReadOnlySpan<SqlKeywordInfo>)SqlKeywords;
             }
@@ -298,9 +298,10 @@ internal static class SqlProcessor
         }
         else
         {
+            var prevKeyword = state.PreviousParsedKeyword?.SqlKeyword ?? SqlKeyword.Unknown;
             state.CaptureNextTokenInSummary =
-                (state.PreviousParsedKeyword.SqlKeyword == SqlKeyword.From && nextChar == ',') ||
-                (state.PreviousParsedKeyword.SqlKeyword == SqlKeyword.On && nextChar == '=');
+                (prevKeyword == SqlKeyword.From && nextChar == ',') ||
+                (prevKeyword == SqlKeyword.On && nextChar == '=');
 
             buffer[state.SanitizedPosition++] = nextChar;
             state.ParsePosition++;
@@ -614,7 +615,7 @@ internal static class SqlProcessor
         // Stored in state to avoid slicing repeatedly.
         public Span<char> SummaryBuffer;
 
-        public SqlKeywordInfo PreviousParsedKeyword;
+        public SqlKeywordInfo? PreviousParsedKeyword;
 
         public SqlKeyword FirstSummaryKeyword;
         public SqlKeyword PreviousSummaryKeyword;
@@ -628,145 +629,169 @@ internal static class SqlProcessor
         public bool CaptureNextTokenInSummary;
     }
 
-    private readonly struct SqlKeywordInfo
+    private sealed class SqlKeywordInfo
     {
         // Used on keywords that are only included in the summary if they are the first keyword in the statement.
-        public static readonly SqlKeyword[] Unknown = [SqlKeyword.Unknown];
+        private static readonly SqlKeyword[] Unknown = [SqlKeyword.Unknown];
 
-        public static readonly SqlKeyword[] DdlKeywords = [
+        private static readonly SqlKeyword[] DdlKeywords = [
             SqlKeyword.Create, SqlKeyword.Drop, SqlKeyword.Alter
         ];
 
-        // Order matters here. If a keyword can be followed by another keyword, the field(s)
-        // it can be followed by should be declared first so that static initialization works.
-
-        // Using static readonly fields (not properties) so we can return by-ref without copying.
-
-        public static readonly SqlKeywordInfo JoinKeyword =
-            new("JOIN", SqlKeyword.Join);
-
-        public static readonly SqlKeywordInfo OnKeyword =
-            new("ON", SqlKeyword.On, followedByKeywords: [JoinKeyword]);
-
-        public static readonly SqlKeywordInfo FromKeyword =
-            new(
-                "FROM",
-                SqlKeyword.From,
-                followedByKeywords: [JoinKeyword]);
-
-        public static readonly SqlKeywordInfo DistinctKeyword =
-            new("DISTINCT", SqlKeyword.Distinct, [SqlKeyword.Select], followedByKeywords: [FromKeyword]);
-
-        public static readonly SqlKeywordInfo SelectKeyword =
-            new("SELECT", SqlKeyword.Select, [SqlKeyword.Select, SqlKeyword.Unknown], followedByKeywords: [FromKeyword, DistinctKeyword]);
-
-        public static readonly SqlKeywordInfo IntoKeyword =
-            new("INTO", SqlKeyword.Into);
-
-        public static readonly SqlKeywordInfo InsertKeyword =
-           new("INSERT", SqlKeyword.Insert, Unknown, followedByKeywords: [IntoKeyword]);
-
-        public static readonly SqlKeywordInfo UpdateKeyword =
-           new("UPDATE", SqlKeyword.Update, Unknown);
-
-        public static readonly SqlKeywordInfo DeleteKeyword =
-           new("DELETE", SqlKeyword.Delete, Unknown);
-
-        public static readonly SqlKeywordInfo ExistsKeyword =
-            new("EXISTS", SqlKeyword.Exists);
-
-        public static readonly SqlKeywordInfo NotKeyword =
-            new("NOT", SqlKeyword.Not, followedByKeywords: [ExistsKeyword]);
-
-        public static readonly SqlKeywordInfo IfKeyword =
-            new("IF", SqlKeyword.If, followedByKeywords: [NotKeyword, ExistsKeyword]);
-
-        public static readonly SqlKeywordInfo TableKeyword =
-            new("TABLE", SqlKeyword.Table, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo IndexKeyword =
-            new("INDEX", SqlKeyword.Index, [..DdlKeywords, SqlKeyword.Unique, SqlKeyword.Clustered, SqlKeyword.NonClustered], followedByKeywords: [OnKeyword, IfKeyword]);
-
-        public static readonly SqlKeywordInfo ClusteredKeyword =
-            new("CLUSTERED", SqlKeyword.Clustered, [SqlKeyword.Unique], followedByKeywords: [IndexKeyword]);
-
-        public static readonly SqlKeywordInfo NonClusteredKeyword =
-            new("NONCLUSTERED", SqlKeyword.NonClustered, [SqlKeyword.Unique], followedByKeywords: [IndexKeyword]);
-
-        public static readonly SqlKeywordInfo UniqueKeyword =
-            new("UNIQUE", SqlKeyword.Unique, DdlKeywords, followedByKeywords:
-                [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
-
-        public static readonly SqlKeywordInfo TriggerKeyword =
-            new("TRIGGER", SqlKeyword.Trigger, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo ViewKeyword =
-            new("VIEW", SqlKeyword.View, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo ProcedureKeyword =
-            new("PROCEDURE", SqlKeyword.Procedure, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo DatabaseKeyword =
-            new("DATABASE", SqlKeyword.Database, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo SchemaKeyword =
-            new("SCHEMA", SqlKeyword.Schema, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo FunctionKeyword =
-            new("FUNCTION", SqlKeyword.Function, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo UserKeyword =
-            new("USER", SqlKeyword.User, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo RoleKeyword =
-            new("ROLE", SqlKeyword.Role, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo SequenceKeyword =
-            new("SEQUENCE", SqlKeyword.Sequence, DdlKeywords, followedByKeywords: [IfKeyword]);
-
-        public static readonly SqlKeywordInfo[] DdlSubKeywords = [
-            TableKeyword, IndexKeyword, ViewKeyword, ProcedureKeyword, TriggerKeyword,
-            DatabaseKeyword, SchemaKeyword, FunctionKeyword, UserKeyword, RoleKeyword, SequenceKeyword, UniqueKeyword,
-            ClusteredKeyword, NonClusteredKeyword
-        ];
-
-        public static readonly SqlKeywordInfo CreateKeyword =
-            new("CREATE", SqlKeyword.Create, Unknown, followedByKeywords: DdlSubKeywords);
-
-        public static readonly SqlKeywordInfo DropKeyword =
-            new("DROP", SqlKeyword.Drop, Unknown, followedByKeywords: DdlSubKeywords);
-
-        public static readonly SqlKeywordInfo AlterKeyword =
-            new("ALTER", SqlKeyword.Alter, Unknown, followedByKeywords: DdlSubKeywords);
-
-        public static readonly SqlKeywordInfo UnknownKeyword =
-            new(string.Empty, SqlKeyword.Unknown);
-
         private readonly SqlKeyword[]? captureInSummaryWhenPrevious;
+
+        static SqlKeywordInfo()
+        {
+            // Phase 1: Create all static instances
+            AlterKeyword = new("ALTER", SqlKeyword.Alter, Unknown);
+            ClusteredKeyword = new("CLUSTERED", SqlKeyword.Clustered, [SqlKeyword.Unique]);
+            CreateKeyword = new("CREATE", SqlKeyword.Create, Unknown);
+            DatabaseKeyword = new("DATABASE", SqlKeyword.Database, DdlKeywords);
+            DeleteKeyword = new("DELETE", SqlKeyword.Delete, Unknown);
+            DistinctKeyword = new("DISTINCT", SqlKeyword.Distinct, [SqlKeyword.Select]);
+            DropKeyword = new("DROP", SqlKeyword.Drop, Unknown);
+            ExistsKeyword = new("EXISTS", SqlKeyword.Exists);
+            FromKeyword = new("FROM", SqlKeyword.From);
+            FunctionKeyword = new("FUNCTION", SqlKeyword.Function, DdlKeywords);
+            IfKeyword = new("IF", SqlKeyword.If);
+            IndexKeyword = new("INDEX", SqlKeyword.Index, [.. DdlKeywords, SqlKeyword.Unique, SqlKeyword.Clustered, SqlKeyword.NonClustered]);
+            InsertKeyword = new("INSERT", SqlKeyword.Insert, Unknown);
+            IntoKeyword = new("INTO", SqlKeyword.Into);
+            JoinKeyword = new("JOIN", SqlKeyword.Join);
+            NonClusteredKeyword = new("NONCLUSTERED", SqlKeyword.NonClustered, [SqlKeyword.Unique]);
+            NotKeyword = new("NOT", SqlKeyword.Not);
+            OnKeyword = new("ON", SqlKeyword.On);
+            ProcedureKeyword = new("PROCEDURE", SqlKeyword.Procedure, DdlKeywords);
+            RoleKeyword = new("ROLE", SqlKeyword.Role, DdlKeywords);
+            SchemaKeyword = new("SCHEMA", SqlKeyword.Schema, DdlKeywords);
+            SelectKeyword = new("SELECT", SqlKeyword.Select, [SqlKeyword.Select, SqlKeyword.Unknown]);
+            SequenceKeyword = new("SEQUENCE", SqlKeyword.Sequence, DdlKeywords);
+            TableKeyword = new("TABLE", SqlKeyword.Table, DdlKeywords);
+            TriggerKeyword = new("TRIGGER", SqlKeyword.Trigger, DdlKeywords);
+            UniqueKeyword = new("UNIQUE", SqlKeyword.Unique, DdlKeywords);
+            UnknownKeyword = new(string.Empty, SqlKeyword.Unknown);
+            UpdateKeyword = new("UPDATE", SqlKeyword.Update, Unknown);
+            UserKeyword = new("USER", SqlKeyword.User, DdlKeywords);
+            ViewKeyword = new("VIEW", SqlKeyword.View, DdlKeywords);
+
+            // Phase 2: Build arrays that depend on instances
+            DdlSubKeywords = [
+                TableKeyword, IndexKeyword, ViewKeyword, ProcedureKeyword, TriggerKeyword,
+                DatabaseKeyword, SchemaKeyword, FunctionKeyword, UserKeyword, RoleKeyword, SequenceKeyword, UniqueKeyword,
+                ClusteredKeyword, NonClusteredKeyword
+            ];
+
+            // Phase 3: Wire follow relationships
+            AlterKeyword.FollowedByKeywords = DdlSubKeywords;
+            ClusteredKeyword.FollowedByKeywords = [IndexKeyword];
+            CreateKeyword.FollowedByKeywords = DdlSubKeywords;
+            DatabaseKeyword.FollowedByKeywords = [IfKeyword];
+            DistinctKeyword.FollowedByKeywords = [FromKeyword];
+            DropKeyword.FollowedByKeywords = DdlSubKeywords;
+            FromKeyword.FollowedByKeywords = [JoinKeyword];
+            FunctionKeyword.FollowedByKeywords = [IfKeyword];
+            IfKeyword.FollowedByKeywords = [NotKeyword, ExistsKeyword];
+            IndexKeyword.FollowedByKeywords = [OnKeyword, IfKeyword];
+            InsertKeyword.FollowedByKeywords = [IntoKeyword];
+            JoinKeyword.FollowedByKeywords = [OnKeyword];
+            NonClusteredKeyword.FollowedByKeywords = [IndexKeyword];
+            NotKeyword.FollowedByKeywords = [ExistsKeyword];
+            OnKeyword.FollowedByKeywords = [JoinKeyword];
+            ProcedureKeyword.FollowedByKeywords = [IfKeyword];
+            RoleKeyword.FollowedByKeywords = [IfKeyword];
+            SchemaKeyword.FollowedByKeywords = [IfKeyword];
+            SelectKeyword.FollowedByKeywords = [FromKeyword, DistinctKeyword];
+            SequenceKeyword.FollowedByKeywords = [IfKeyword];
+            TableKeyword.FollowedByKeywords = [IfKeyword];
+            TriggerKeyword.FollowedByKeywords = [IfKeyword];
+            UniqueKeyword.FollowedByKeywords = [IndexKeyword, ClusteredKeyword, NonClusteredKeyword];
+            UserKeyword.FollowedByKeywords = [IfKeyword];
+            ViewKeyword.FollowedByKeywords = [IfKeyword];
+        }
 
         private SqlKeywordInfo(
             string keyword,
             SqlKeyword sqlKeyword,
-            SqlKeyword[]? captureInSummaryWhenPrevious = null,
-            SqlKeywordInfo[]? followedByKeywords = null)
+            SqlKeyword[]? captureInSummaryWhenPrevious = null)
         {
             this.KeywordText = keyword;
             this.SqlKeyword = sqlKeyword;
             this.captureInSummaryWhenPrevious = captureInSummaryWhenPrevious;
-            this.FollowedByKeywords = followedByKeywords ?? [];
+            this.FollowedByKeywords = [];
         }
+
+        public static SqlKeywordInfo AlterKeyword { get; }
+
+        public static SqlKeywordInfo ClusteredKeyword { get; }
+
+        public static SqlKeywordInfo CreateKeyword { get; }
+
+        public static SqlKeywordInfo DatabaseKeyword { get; }
+
+        public static SqlKeywordInfo DeleteKeyword { get; }
+
+        public static SqlKeywordInfo DistinctKeyword { get; }
+
+        public static SqlKeywordInfo DropKeyword { get; }
+
+        public static SqlKeywordInfo ExistsKeyword { get; }
+
+        public static SqlKeywordInfo FromKeyword { get; }
+
+        public static SqlKeywordInfo FunctionKeyword { get; }
+
+        public static SqlKeywordInfo IfKeyword { get; }
+
+        public static SqlKeywordInfo IndexKeyword { get; }
+
+        public static SqlKeywordInfo InsertKeyword { get; }
+
+        public static SqlKeywordInfo IntoKeyword { get; }
+
+        public static SqlKeywordInfo JoinKeyword { get; }
+
+        public static SqlKeywordInfo NonClusteredKeyword { get; }
+
+        public static SqlKeywordInfo NotKeyword { get; }
+
+        public static SqlKeywordInfo OnKeyword { get; }
+
+        public static SqlKeywordInfo ProcedureKeyword { get; }
+
+        public static SqlKeywordInfo RoleKeyword { get; }
+
+        public static SqlKeywordInfo SchemaKeyword { get; }
+
+        public static SqlKeywordInfo SelectKeyword { get; }
+
+        public static SqlKeywordInfo SequenceKeyword { get; }
+
+        public static SqlKeywordInfo TableKeyword { get; }
+
+        public static SqlKeywordInfo TriggerKeyword { get; }
+
+        public static SqlKeywordInfo UniqueKeyword { get; }
+
+        public static SqlKeywordInfo UnknownKeyword { get; }
+
+        public static SqlKeywordInfo UpdateKeyword { get; }
+
+        public static SqlKeywordInfo UserKeyword { get; }
+
+        public static SqlKeywordInfo ViewKeyword { get; }
+
+        public static SqlKeywordInfo[] DdlSubKeywords { get; }
 
         public string KeywordText { get; }
 
         public SqlKeyword SqlKeyword { get; }
 
-        public SqlKeywordInfo[] FollowedByKeywords { get; }
+        public SqlKeywordInfo[] FollowedByKeywords { get; private set; }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool CaptureNextTokenInSummary(in ParseState state, SqlKeyword currentKeyword) => currentKeyword switch
         {
             SqlKeyword.From => state.PreviousSummaryKeyword is SqlKeyword.Select or SqlKeyword.Distinct,
-            SqlKeyword.On => state.PreviousSummaryKeyword == SqlKeyword.Join,
             SqlKeyword.Into => state.FirstSummaryKeyword is SqlKeyword.Insert,
             SqlKeyword.Join => state.FirstSummaryKeyword is SqlKeyword.Select or SqlKeyword.Join,
             SqlKeyword.Database or SqlKeyword.Schema or SqlKeyword.Table or SqlKeyword.Index or SqlKeyword.View
@@ -784,9 +809,10 @@ internal static class SqlProcessor
                 return false;
             }
 
+            var prev = state.PreviousParsedKeyword?.SqlKeyword ?? SqlKeyword.Unknown;
             for (int i = 0; i < currentKeyword.captureInSummaryWhenPrevious.Length; i++)
             {
-                if (currentKeyword.captureInSummaryWhenPrevious[i] == state.PreviousParsedKeyword.SqlKeyword)
+                if (currentKeyword.captureInSummaryWhenPrevious[i] == prev)
                 {
                     return true;
                 }
