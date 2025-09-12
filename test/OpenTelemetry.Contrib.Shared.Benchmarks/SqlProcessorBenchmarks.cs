@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Diagnosers;
 
 namespace OpenTelemetry.Instrumentation.Benchmarks;
 
-[MemoryDiagnoser]
+[MemoryDiagnoser(displayGenColumns: false)]
 public class SqlProcessorBenchmarks
 {
     [Params(
@@ -20,5 +21,5 @@ public class SqlProcessorBenchmarks
     public string Sql { get; set; } = string.Empty;
 
     [Benchmark]
-    public void Simple() => SqlProcessor.GetSanitizedSql(this.Sql);
+    public void GetSanitizedSql() => SqlProcessor.GetSanitizedSql(this.Sql);
 }

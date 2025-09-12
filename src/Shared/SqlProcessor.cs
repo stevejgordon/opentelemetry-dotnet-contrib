@@ -144,7 +144,7 @@ internal static class SqlProcessor
 
         ParseState state = default;
 
-        // Precompute the summary buffer slice once and carry it via state to avoid repeated Span.Slice calls
+        // Precompute the summary buffer slice once and carry it via state to avoid repeated Span.Slice calls.
         state.SummaryBuffer = buffer.Slice(rentedBuffer.Length / 2);
 
         while (state.ParsePosition < sql.Length)
@@ -192,8 +192,6 @@ internal static class SqlProcessor
         Span<char> buffer,
         ref ParseState state)
     {
-        var previousKeywordInfo = state.PreviousParsedKeyword;
-
         var nextChar = sql[state.ParsePosition];
 
         // Quick first-character filter: only attempt keyword matching if the current char is an ASCII letter
@@ -207,18 +205,14 @@ internal static class SqlProcessor
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
         if (mayBeKeyword)
         {
-            // Early boundary check:
-            // Scan the contiguous ASCII-letter run once and verify the following char is whitespace or we're at the end.
-            // If not, keywords cannot match as we expect whitespace after the keyword, so skip keyword matching.
-            // Doing this check first avoids unnecessary keyword comparisons.
-            var remainingSqlToParse = sql.Slice(state.ParsePosition);
+            var remainingSql = sql.Slice(state.ParsePosition);
 
             // Determine the length of the next contiguous ascii-letter run
             // This allows some fast paths in the comparisons below.
             var asciiLetterLength = 1;
-            while (asciiLetterLength < remainingSqlToParse.Length)
+            while (asciiLetterLength < remainingSql.Length)
             {
-                var ch = remainingSqlToParse[asciiLetterLength];
+                var ch = remainingSql[asciiLetterLength];
 #if NET
                 if (!char.IsAsciiLetter(ch))
 #else
@@ -231,99 +225,95 @@ internal static class SqlProcessor
                 asciiLetterLength++;
             }
 
-            // Once we know the length of the next ascii-letter run, check if the length is in
-            // the range of the length on keywords we handle (2 to 12 characters).
-            if (asciiLetterLength > 1 && asciiLetterLength < 13)
+            // NOTE: At one stage we tried checking if the length was between 2 and 12 (inclusive)
+            // the range of shortest and longest keywords. This ended up being slower in practice
+            // as many tokens fall into this range and it was faster to skip the length check.
+
+            ReadOnlySpan<SqlKeywordInfo> keywordsToCheck;
+
+            // Check if the previous character is '(', in which case, we only check against the SELECT keyword.
+            // Otherwise, check if the previous keyword may be the start of a keyword chain so we can limit the
+            // number of keyword comparisons we need to do by only comparing for tokens we expect to appear next.
+            if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(')
             {
-                ReadOnlySpan<SqlKeywordInfo> keywordsToCheck;
+                keywordsToCheck = SelectOnlyKeywordArray;
+            }
+            else
+            {
+                var previousKeywordInfo = state.PreviousParsedKeyword;
 
-                // Check if previous character is '(', in which case, we only check against the SELECT keyword.
-                // Otherwise, check if the previous keyword may be the start of a keyword chain so we can limit the
-                // number of keyword comparisons we need to do by only comparing for tokens we expect to appear next.
-                if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(')
+                keywordsToCheck = previousKeywordInfo != null && previousKeywordInfo.FollowedByKeywords.Length > 0
+                    ? (ReadOnlySpan<SqlKeywordInfo>)previousKeywordInfo.FollowedByKeywords
+                    : (ReadOnlySpan<SqlKeywordInfo>)SqlKeywords;
+            }
+
+            for (int i = 0; i < keywordsToCheck.Length; i++)
+            {
+                var potentialKeywordInfo = keywordsToCheck[i];
+
+                var keywordSpan = potentialKeywordInfo.KeywordText.AsSpan();
+                var keywordLength = keywordSpan.Length;
+
+                // If the next token length doesn't match the keyword length, it can't be a match.
+                if (asciiLetterLength != keywordLength)
                 {
-                    keywordsToCheck = SelectOnlyKeywordArray;
+                    continue;
                 }
-                else
+
+                // First-letter quick check to reduce comparisons early.
+                // We know the current char is an ASCII letter so this is a safe way to lowercase.
+                // The keyword string is already lowercase so doesn't need to be lowercased here.
+                if ((remainingSql[0] | 0x20) != keywordSpan[0])
                 {
-                    keywordsToCheck = previousKeywordInfo != null && previousKeywordInfo.FollowedByKeywords.Length > 0
-                        ? (ReadOnlySpan<SqlKeywordInfo>)previousKeywordInfo.FollowedByKeywords
-                        : (ReadOnlySpan<SqlKeywordInfo>)SqlKeywords;
+                    continue;
                 }
 
-                for (int i = 0; i < keywordsToCheck.Length; i++)
+                var matchedKeyword = true;
+
+                var sqlToCopy = remainingSql.Slice(0, keywordLength);
+
+                // Compare the potential keyword in a case-insensitive manner
+                for (var charPos = 1; charPos < keywordLength; charPos++)
                 {
-                    var potentialKeywordInfo = keywordsToCheck[i];
-
-                    // If the next token length doesn't match the keyword length, it can't be a match.
-                    if (asciiLetterLength != potentialKeywordInfo.KeywordText.Length)
+                    if ((sqlToCopy[charPos] | 0x20) != keywordSpan[charPos])
                     {
-                        continue;
+                        matchedKeyword = false;
+                        break;
                     }
+                }
 
-                    var keywordSpan = potentialKeywordInfo.KeywordText.AsSpan();
-                    var keywordLength = keywordSpan.Length;
+                if (matchedKeyword)
+                {
+                    sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
+                    state.SanitizedPosition += keywordLength;
 
-                    // If the remaining SQL length is less than the keyword length
-                    // it can't possibly match.
-                    if (remainingSqlToParse.Length < keywordLength)
+                    // We only capture if we haven't already filled the summary to the max length of 255.
+                    if (state.SummaryPosition < 255)
                     {
-                        continue;
-                    }
-
-                    // First-letter quick check to reduce comparisons early
-                    if ((remainingSqlToParse[0] | 0x20) != (keywordSpan[0] | 0x20))
-                    {
-                        continue;
-                    }
-
-                    var matchedKeyword = true;
-
-                    var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
-
-                    // Compare the potential keyword in a case-insensitive manner
-                    for (int charPos = 1; charPos < keywordLength; charPos++)
-                    {
-                        if ((sqlToCopy[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
+                        // Check if the keyword should be captured in the summary
+                        if (SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
                         {
-                            matchedKeyword = false;
-                            break;
-                        }
-                    }
-
-                    if (matchedKeyword)
-                    {
-                        sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
-                        state.SanitizedPosition += keywordLength;
-
-                        // We only capture if we haven't already filled the summary to the max length of 255.
-                        if (state.SummaryPosition < 255)
-                        {
-                            // Check if the keyword should be captured in the summary
-                            if (SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
+                            if (state.SummaryPosition == 0)
                             {
-                                if (state.SummaryPosition == 0)
-                                {
-                                    state.FirstSummaryKeyword = potentialKeywordInfo.SqlKeyword;
-                                }
-
-                                sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
-                                state.SummaryPosition += keywordLength;
-
-                                // Add a space after the keyword. The trailing space will be trimmed later if needed.
-                                state.SummaryBuffer[state.SummaryPosition++] = ' ';
-
-                                state.PreviousSummaryKeyword = potentialKeywordInfo.SqlKeyword;
+                                state.FirstSummaryKeyword = potentialKeywordInfo.SqlKeyword;
                             }
+
+                            sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
+                            state.SummaryPosition += keywordLength;
+
+                            // Add a space after the keyword. The trailing space will be trimmed later if needed.
+                            state.SummaryBuffer[state.SummaryPosition++] = ' ';
+
+                            state.PreviousSummaryKeyword = potentialKeywordInfo.SqlKeyword;
                         }
-
-                        state.CaptureNextTokenInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
-                        state.PreviousParsedKeyword = potentialKeywordInfo;
-                        state.ParsePosition += keywordLength;
-
-                        // No further parsing needed for this token
-                        return;
                     }
+
+                    state.CaptureNextTokenInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
+                    state.PreviousParsedKeyword = potentialKeywordInfo;
+                    state.ParsePosition += keywordLength;
+
+                    // No further parsing needed for this token
+                    return;
                 }
             }
         }
@@ -693,20 +683,20 @@ internal static class SqlProcessor
         // - Keeping the struct simple and flat minimizes stack pressure and lets the JIT keep values in registers.
 
         // Stored in state to avoid slicing repeatedly.
-        public Span<char> SummaryBuffer;
+        public Span<char> SummaryBuffer; // 16 bytes (on x64)
 
-        public SqlKeywordInfo? PreviousParsedKeyword;
+        public SqlKeywordInfo? PreviousParsedKeyword; // 8 bytes (reference type)
 
-        public SqlKeyword FirstSummaryKeyword;
-        public SqlKeyword PreviousSummaryKeyword;
+        public SqlKeyword FirstSummaryKeyword; // 4 bytes (enum, underlying int)
+        public SqlKeyword PreviousSummaryKeyword; // 4 bytes (enum, underlying int)
 
         // These track the current parse position in the input SQL and the current write position
         // for the sanitized SQL and summary buffers.
-        public int ParsePosition;
-        public int SanitizedPosition;
-        public int SummaryPosition;
+        public int ParsePosition; // 4 bytes
+        public int SanitizedPosition; // 4 bytes
+        public int SummaryPosition; // 4 bytes
 
-        public bool CaptureNextTokenInSummary;
+        public bool CaptureNextTokenInSummary; // 1 byte
     }
 
     private sealed class SqlKeywordInfo
@@ -722,37 +712,38 @@ internal static class SqlProcessor
 
         static SqlKeywordInfo()
         {
-            // Phase 1: Create all static instances
-            AlterKeyword = new("ALTER", SqlKeyword.Alter, Unknown);
-            ClusteredKeyword = new("CLUSTERED", SqlKeyword.Clustered, [SqlKeyword.Unique]);
-            CreateKeyword = new("CREATE", SqlKeyword.Create, Unknown);
-            DatabaseKeyword = new("DATABASE", SqlKeyword.Database, DdlKeywords);
-            DeleteKeyword = new("DELETE", SqlKeyword.Delete, Unknown);
-            DistinctKeyword = new("DISTINCT", SqlKeyword.Distinct, [SqlKeyword.Select]);
-            DropKeyword = new("DROP", SqlKeyword.Drop, Unknown);
-            ExistsKeyword = new("EXISTS", SqlKeyword.Exists);
-            FromKeyword = new("FROM", SqlKeyword.From);
-            FunctionKeyword = new("FUNCTION", SqlKeyword.Function, DdlKeywords);
-            IfKeyword = new("IF", SqlKeyword.If);
-            IndexKeyword = new("INDEX", SqlKeyword.Index, [.. DdlKeywords, SqlKeyword.Unique, SqlKeyword.Clustered, SqlKeyword.NonClustered]);
-            InsertKeyword = new("INSERT", SqlKeyword.Insert, Unknown);
-            IntoKeyword = new("INTO", SqlKeyword.Into);
-            JoinKeyword = new("JOIN", SqlKeyword.Join);
-            NonClusteredKeyword = new("NONCLUSTERED", SqlKeyword.NonClustered, [SqlKeyword.Unique]);
-            NotKeyword = new("NOT", SqlKeyword.Not);
-            OnKeyword = new("ON", SqlKeyword.On);
-            ProcedureKeyword = new("PROCEDURE", SqlKeyword.Procedure, DdlKeywords);
-            RoleKeyword = new("ROLE", SqlKeyword.Role, DdlKeywords);
-            SchemaKeyword = new("SCHEMA", SqlKeyword.Schema, DdlKeywords);
-            SelectKeyword = new("SELECT", SqlKeyword.Select, [SqlKeyword.Select, SqlKeyword.Unknown]);
-            SequenceKeyword = new("SEQUENCE", SqlKeyword.Sequence, DdlKeywords);
-            TableKeyword = new("TABLE", SqlKeyword.Table, DdlKeywords);
-            TriggerKeyword = new("TRIGGER", SqlKeyword.Trigger, DdlKeywords);
-            UniqueKeyword = new("UNIQUE", SqlKeyword.Unique, DdlKeywords);
+            // Phase 1: Create all static instances.
+            // We will compare the SQL we are parsing in lowercase, so we store these in lowercase also.
+            AlterKeyword = new("alter", SqlKeyword.Alter, Unknown);
+            ClusteredKeyword = new("clustered", SqlKeyword.Clustered, [SqlKeyword.Unique]);
+            CreateKeyword = new("create", SqlKeyword.Create, Unknown);
+            DatabaseKeyword = new("database", SqlKeyword.Database, DdlKeywords);
+            DeleteKeyword = new("delete", SqlKeyword.Delete, Unknown);
+            DistinctKeyword = new("distinct", SqlKeyword.Distinct, [SqlKeyword.Select]);
+            DropKeyword = new("drop", SqlKeyword.Drop, Unknown);
+            ExistsKeyword = new("exists", SqlKeyword.Exists);
+            FromKeyword = new("from", SqlKeyword.From);
+            FunctionKeyword = new("function", SqlKeyword.Function, DdlKeywords);
+            IfKeyword = new("if", SqlKeyword.If);
+            IndexKeyword = new("index", SqlKeyword.Index, [.. DdlKeywords, SqlKeyword.Unique, SqlKeyword.Clustered, SqlKeyword.NonClustered]);
+            InsertKeyword = new("insert", SqlKeyword.Insert, Unknown);
+            IntoKeyword = new("into", SqlKeyword.Into);
+            JoinKeyword = new("join", SqlKeyword.Join);
+            NonClusteredKeyword = new("nonclustered", SqlKeyword.NonClustered, [SqlKeyword.Unique]);
+            NotKeyword = new("not", SqlKeyword.Not);
+            OnKeyword = new("on", SqlKeyword.On);
+            ProcedureKeyword = new("procedure", SqlKeyword.Procedure, DdlKeywords);
+            RoleKeyword = new("role", SqlKeyword.Role, DdlKeywords);
+            SchemaKeyword = new("schema", SqlKeyword.Schema, DdlKeywords);
+            SelectKeyword = new("select", SqlKeyword.Select, [SqlKeyword.Select, SqlKeyword.Unknown]);
+            SequenceKeyword = new("sequence", SqlKeyword.Sequence, DdlKeywords);
+            TableKeyword = new("table", SqlKeyword.Table, DdlKeywords);
+            TriggerKeyword = new("trigger", SqlKeyword.Trigger, DdlKeywords);
+            UniqueKeyword = new("unique", SqlKeyword.Unique, DdlKeywords);
             UnknownKeyword = new(string.Empty, SqlKeyword.Unknown);
-            UpdateKeyword = new("UPDATE", SqlKeyword.Update, Unknown);
-            UserKeyword = new("USER", SqlKeyword.User, DdlKeywords);
-            ViewKeyword = new("VIEW", SqlKeyword.View, DdlKeywords);
+            UpdateKeyword = new("update", SqlKeyword.Update, Unknown);
+            UserKeyword = new("user", SqlKeyword.User, DdlKeywords);
+            ViewKeyword = new("view", SqlKeyword.View, DdlKeywords);
 
             // Phase 2: Build arrays that depend on instances
             DdlSubKeywords = [
