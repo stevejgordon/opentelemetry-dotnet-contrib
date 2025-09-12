@@ -207,103 +207,123 @@ internal static class SqlProcessor
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
         if (mayBeKeyword)
         {
-            ReadOnlySpan<SqlKeywordInfo> keywordsToCheck;
+            // Early boundary check:
+            // Scan the contiguous ASCII-letter run once and verify the following char is whitespace or we're at the end.
+            // If not, keywords cannot match as we expect whitespace after the keyword, so skip keyword matching.
+            // Doing this check first avoids unnecessary keyword comparisons.
+            var remainingSqlToParse = sql.Slice(state.ParsePosition);
 
-            // Check if previous character is '(', in which case, we only check against the SELECT keyword.
-            // Otherwise, check if the previous keyword may be the start of a keyword chain so we can limit the
-            // number of keyword comparisons we need to do by only comparing for tokens we expect to appear next.
-            if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(' && mayBeKeyword)
+            // Determine the length of the next contiguous ascii-letter run
+            // This allows some fast paths in the comparisons below.
+            var asciiLetterLength = 1;
+            while (asciiLetterLength < remainingSqlToParse.Length)
             {
-                keywordsToCheck = SelectOnlyKeywordArray;
-            }
-            else
-            {
-                keywordsToCheck = previousKeywordInfo != null && previousKeywordInfo.FollowedByKeywords.Length > 0
-                    ? (ReadOnlySpan<SqlKeywordInfo>)previousKeywordInfo.FollowedByKeywords
-                    : (ReadOnlySpan<SqlKeywordInfo>)SqlKeywords;
-            }
-
-            for (int i = 0; i < keywordsToCheck.Length; i++)
-            {
-                var potentialKeywordInfo = keywordsToCheck[i];
-                var remainingSqlToParse = sql.Slice(state.ParsePosition);
-                var keywordSpan = potentialKeywordInfo.KeywordText.AsSpan();
-                var keywordLength = keywordSpan.Length;
-
-                // If the remaining SQL length is less than the keyword length
-                // it can't possibly match.
-                if (remainingSqlToParse.Length < keywordLength)
-                {
-                    continue;
-                }
-
-                // First-letter quick check to reduce comparisons early
-                if ((remainingSqlToParse[0] | 0x20) != (keywordSpan[0] | 0x20))
-                {
-                    continue;
-                }
-
-                // Check for whitespace after the potential token.
-                // Early exit if no whitespace is found.
-                if (remainingSqlToParse.Length > keywordLength)
-                {
+                var ch = remainingSqlToParse[asciiLetterLength];
 #if NET
-                    if (!WhitespaceSearchValues.Contains(remainingSqlToParse[keywordLength]))
+                if (!char.IsAsciiLetter(ch))
 #else
-                    var charAfterKeyword = remainingSqlToParse[keywordLength];
-                    if (charAfterKeyword != ' ' && charAfterKeyword != '\t' && charAfterKeyword != '\r' && charAfterKeyword != '\n')
+                if (!IsAsciiLetter(ch))
 #endif
+                {
+                    break;
+                }
+
+                asciiLetterLength++;
+            }
+
+            // Once we know the length of the next ascii-letter run, check if the length is in
+            // the range of the length on keywords we handle (2 to 12 characters).
+            if (asciiLetterLength > 1 && asciiLetterLength < 13)
+            {
+                ReadOnlySpan<SqlKeywordInfo> keywordsToCheck;
+
+                // Check if previous character is '(', in which case, we only check against the SELECT keyword.
+                // Otherwise, check if the previous keyword may be the start of a keyword chain so we can limit the
+                // number of keyword comparisons we need to do by only comparing for tokens we expect to appear next.
+                if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(')
+                {
+                    keywordsToCheck = SelectOnlyKeywordArray;
+                }
+                else
+                {
+                    keywordsToCheck = previousKeywordInfo != null && previousKeywordInfo.FollowedByKeywords.Length > 0
+                        ? (ReadOnlySpan<SqlKeywordInfo>)previousKeywordInfo.FollowedByKeywords
+                        : (ReadOnlySpan<SqlKeywordInfo>)SqlKeywords;
+                }
+
+                for (int i = 0; i < keywordsToCheck.Length; i++)
+                {
+                    var potentialKeywordInfo = keywordsToCheck[i];
+
+                    // If the next token length doesn't match the keyword length, it can't be a match.
+                    if (asciiLetterLength != potentialKeywordInfo.KeywordText.Length)
                     {
                         continue;
                     }
-                }
 
-                var matchedKeyword = true;
+                    var keywordSpan = potentialKeywordInfo.KeywordText.AsSpan();
+                    var keywordLength = keywordSpan.Length;
 
-                var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
-
-                // Compare the potential keyword in a case-insensitive manner
-                for (int charPos = 1; charPos < keywordLength; charPos++)
-                {
-                    if ((sqlToCopy[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
+                    // If the remaining SQL length is less than the keyword length
+                    // it can't possibly match.
+                    if (remainingSqlToParse.Length < keywordLength)
                     {
-                        matchedKeyword = false;
-                        break;
+                        continue;
                     }
-                }
 
-                if (matchedKeyword)
-                {
-                    sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
-                    state.SanitizedPosition += keywordLength;
-
-                    // We only capture if we haven't already filled the summary to the max length of 255.
-                    if (state.SummaryPosition < 255)
+                    // First-letter quick check to reduce comparisons early
+                    if ((remainingSqlToParse[0] | 0x20) != (keywordSpan[0] | 0x20))
                     {
-                        // Check if the keyword should be captured in the summary
-                        if (SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
+                        continue;
+                    }
+
+                    var matchedKeyword = true;
+
+                    var sqlToCopy = remainingSqlToParse.Slice(0, keywordLength);
+
+                    // Compare the potential keyword in a case-insensitive manner
+                    for (int charPos = 1; charPos < keywordLength; charPos++)
+                    {
+                        if ((sqlToCopy[charPos] | 0x20) != (keywordSpan[charPos] | 0x20))
                         {
-                            if (state.SummaryPosition == 0)
-                            {
-                                state.FirstSummaryKeyword = potentialKeywordInfo.SqlKeyword;
-                            }
-
-                            sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
-                            state.SummaryPosition += keywordLength;
-
-                            // Add a space after the keyword. The trailing space will be trimmed later if needed.
-                            state.SummaryBuffer[state.SummaryPosition++] = ' ';
-
-                            state.PreviousSummaryKeyword = potentialKeywordInfo.SqlKeyword;
+                            matchedKeyword = false;
+                            break;
                         }
                     }
 
-                    state.CaptureNextTokenInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
-                    state.PreviousParsedKeyword = potentialKeywordInfo;
-                    state.ParsePosition += keywordLength;
+                    if (matchedKeyword)
+                    {
+                        sqlToCopy.CopyTo(buffer.Slice(state.SanitizedPosition));
+                        state.SanitizedPosition += keywordLength;
 
-                    // No further parsing needed for this token
-                    return;
+                        // We only capture if we haven't already filled the summary to the max length of 255.
+                        if (state.SummaryPosition < 255)
+                        {
+                            // Check if the keyword should be captured in the summary
+                            if (SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
+                            {
+                                if (state.SummaryPosition == 0)
+                                {
+                                    state.FirstSummaryKeyword = potentialKeywordInfo.SqlKeyword;
+                                }
+
+                                sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
+                                state.SummaryPosition += keywordLength;
+
+                                // Add a space after the keyword. The trailing space will be trimmed later if needed.
+                                state.SummaryBuffer[state.SummaryPosition++] = ' ';
+
+                                state.PreviousSummaryKeyword = potentialKeywordInfo.SqlKeyword;
+                            }
+                        }
+
+                        state.CaptureNextTokenInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
+                        state.PreviousParsedKeyword = potentialKeywordInfo;
+                        state.ParsePosition += keywordLength;
+
+                        // No further parsing needed for this token
+                        return;
+                    }
                 }
             }
         }
