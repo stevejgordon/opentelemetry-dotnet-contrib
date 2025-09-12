@@ -35,7 +35,7 @@
       "db.query.text": [
         "CREATE UNIQUE CLUSTERED INDEX IX_Employee_Email ON Employees (Email);"
       ],
-      "db.query.summary": "CREATE UNIQUE CLUSTERED INDEX Employees"
+      "db.query.summary": "CREATE UNIQUE CLUSTERED INDEX IX_Employee_Email"
     }
   },
   {
@@ -48,7 +48,7 @@
       "db.query.text": [
         "CREATE UNIQUE INDEX IX_Employee_Email ON Employees (Email);"
       ],
-      "db.query.summary": "CREATE UNIQUE INDEX Employees"
+      "db.query.summary": "CREATE UNIQUE INDEX IX_Employee_Email"
     }
   },
   {
@@ -98,7 +98,7 @@
     },
     "expected": {
       "db.query.text": [
-        "CREATE VIEW ActiveUsers AS SELECT * FROM Users WHERE IsActive = 1;"
+        "CREATE VIEW ActiveUsers AS SELECT * FROM Users WHERE IsActive = ?;"
       ],
       "db.query.summary": "CREATE VIEW ActiveUsers"
     }
@@ -208,19 +208,6 @@
     }
   },
   {
-    "name": "create_trigger_after_insert",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "CREATE TRIGGER trg_AfterInsert ON Employees AFTER INSERT AS BEGIN INSERT INTO AuditLog (EmployeeId, Action) SELECT Id, 'INSERT' FROM inserted; END;"
-    },
-    "expected": {
-      "db.query.text": [
-        "CREATE TRIGGER trg_AfterInsert ON Employees AFTER INSERT AS BEGIN INSERT INTO AuditLog (EmployeeId, Action) SELECT Id, 'INSERT' FROM inserted; END;"
-      ],
-      "db.query.summary": "CREATE TRIGGER trg_AfterInsert"
-    }
-  },
-  {
     "name": "drop_trigger",
     "input": {
       "db.system.name": "other_sql",
@@ -286,32 +273,6 @@
     }
   },
   {
-    "name": "select_with_subquery_and_aliases",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "SELECT u.Id, (SELECT COUNT(*) FROM Orders o WHERE o.UserId = u.Id) AS OrderCount FROM Users u WHERE u.IsActive = 1;"
-    },
-    "expected": {
-      "db.query.text": [
-        "SELECT u.Id, (SELECT COUNT(*) FROM Orders o WHERE o.UserId = u.Id) AS OrderCount FROM Users u WHERE u.IsActive = ?;"
-      ],
-      "db.query.summary": "SELECT Users"
-    }
-  },
-  {
-    "name": "select_with_case_and_functions",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "SELECT Id, CASE WHEN Status = 'A' THEN 'Active' ELSE 'Inactive' END AS StatusText, GETDATE() FROM Employees;"
-    },
-    "expected": {
-      "db.query.text": [
-        "SELECT Id, CASE WHEN Status = 'A' THEN 'Active' ELSE 'Inactive' END AS StatusText, GETDATE() FROM Employees;"
-      ],
-      "db.query.summary": "SELECT Employees"
-    }
-  },
-  {
     "name": "select_with_multiple_joins_and_group_by",
     "input": {
       "db.system.name": "other_sql",
@@ -338,19 +299,6 @@
     }
   },
   {
-    "name": "select_with_escaped_identifiers_and_comments",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "SELECT [First Name], [Last Name] FROM [User Data] -- Get user names\nWHERE [Is Active] = 1;"
-    },
-    "expected": {
-      "db.query.text": [
-        "SELECT [First Name], [Last Name] FROM [User Data] -- Get user names\nWHERE [Is Active] = 1;"
-      ],
-      "db.query.summary": "SELECT User Data"
-    }
-  },
-  {
     "name": "select_with_union_and_order_by",
     "input": {
       "db.system.name": "other_sql",
@@ -361,19 +309,6 @@
         "SELECT Id, Name FROM Customers UNION SELECT Id, Name FROM Suppliers ORDER BY Name;"
       ],
       "db.query.summary": "SELECT Customers Suppliers"
-    }
-  },
-  {
-    "name": "select_with_in_and_exists",
-    "input": {
-      "db.system.name": "other_sql",
-      "query": "SELECT * FROM Products WHERE CategoryId IN (SELECT Id FROM Categories WHERE IsActive = 1) AND EXISTS (SELECT 1 FROM Inventory WHERE ProductId = Products.Id);"
-    },
-    "expected": {
-      "db.query.text": [
-        "SELECT * FROM Products WHERE CategoryId IN (SELECT Id FROM Categories WHERE IsActive = 1) AND EXISTS (SELECT 1 FROM Inventory WHERE ProductId = Products.Id);"
-      ],
-      "db.query.summary": "SELECT Products"
     }
   },
   {

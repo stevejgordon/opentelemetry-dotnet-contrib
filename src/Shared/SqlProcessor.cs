@@ -66,6 +66,9 @@ internal static class SqlProcessor
         User,
         Role,
         Sequence,
+        If,
+        Not,
+        Exists,
     }
 
     public static SqlStatementInfo GetSanitizedSql(string? sql)
@@ -151,18 +154,18 @@ internal static class SqlProcessor
 
         // Quick first-character filter: only attempt keyword matching if the current char is an ASCII letter
         var lower = (char)(nextChar | 0x20);
-        var canBeKeyword = lower >= 'a' && lower <= 'z';
+        var mayBeKeyword = lower >= 'a' && lower <= 'z';
 
         // As an optimization, we only compare for keywords if we haven't already captured 255 characters for the summary.
         // Avoid comparing for keywords if the previous token was a keyword that is expected to be followed by an identifier.
-        if (canBeKeyword && !state.PotentiallyCaptureInSummary)
+        if (mayBeKeyword)
         {
             ReadOnlySpan<SqlKeywordInfo> keywordsToCheck;
 
             // Check if previous character is '(', in which case, we only check against the SELECT keyword.
             // Otherwise, check if the previous keyword may be the start of a keyword chain so we can limit the
             // number of keyword comparisons we need to do by only comparing for tokens we expect to appear next.
-            if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(' && canBeKeyword)
+            if (state.ParsePosition > 0 && sql[state.ParsePosition - 1] == '(' && mayBeKeyword)
             {
                 keywordsToCheck = SelectOnlyKeywordArray;
             }
@@ -226,7 +229,7 @@ internal static class SqlProcessor
                     if (state.SummaryPosition < 255)
                     {
                         // Check if the keyword should be captured in the summary
-                        if (potentialKeywordInfo.CaptureInSummary(previousKeywordInfo.SqlKeyword))
+                        if (SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
                         {
                             if (state.SummaryPosition == 0)
                             {
@@ -243,7 +246,7 @@ internal static class SqlProcessor
                         }
                     }
 
-                    state.PotentiallyCaptureInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
+                    state.CaptureNextTokenInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
                     state.PreviousParsedKeyword = potentialKeywordInfo;
                     state.ParsePosition += keywordLength;
 
@@ -279,7 +282,7 @@ internal static class SqlProcessor
                 state.SanitizedPosition += length;
 
                 // Optionally copy to summary buffer
-                if (state.SummaryPosition < 255 && state.PotentiallyCaptureInSummary)
+                if (state.SummaryPosition < 255 && state.CaptureNextTokenInSummary)
                 {
                     // We may copy paste 255 here which is fine as we slice to max 255 when creating the final string
                     sql.Slice(start, length).CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
@@ -291,11 +294,11 @@ internal static class SqlProcessor
             }
 
             state.ParsePosition = i;
-            state.PotentiallyCaptureInSummary = false;
+            state.CaptureNextTokenInSummary = false;
         }
         else
         {
-            state.PotentiallyCaptureInSummary =
+            state.CaptureNextTokenInSummary =
                 (state.PreviousParsedKeyword.SqlKeyword == SqlKeyword.From && nextChar == ',') ||
                 (state.PreviousParsedKeyword.SqlKeyword == SqlKeyword.On && nextChar == '=');
 
@@ -622,7 +625,7 @@ internal static class SqlProcessor
         public int SanitizedPosition;
         public int SummaryPosition;
 
-        public bool PotentiallyCaptureInSummary;
+        public bool CaptureNextTokenInSummary;
     }
 
     private readonly struct SqlKeywordInfo
@@ -641,6 +644,9 @@ internal static class SqlProcessor
 
         public static readonly SqlKeywordInfo JoinKeyword =
             new("JOIN", SqlKeyword.Join);
+
+        public static readonly SqlKeywordInfo OnKeyword =
+            new("ON", SqlKeyword.On, followedByKeywords: [JoinKeyword]);
 
         public static readonly SqlKeywordInfo FromKeyword =
             new(
@@ -666,55 +672,62 @@ internal static class SqlProcessor
         public static readonly SqlKeywordInfo DeleteKeyword =
            new("DELETE", SqlKeyword.Delete, Unknown);
 
-        public static readonly SqlKeywordInfo TableKeyword =
-            new("TABLE", SqlKeyword.Table, DdlKeywords);
+        public static readonly SqlKeywordInfo ExistsKeyword =
+            new("EXISTS", SqlKeyword.Exists);
 
-        public static readonly SqlKeywordInfo OnKeyword =
-            new("ON", SqlKeyword.On);
+        public static readonly SqlKeywordInfo NotKeyword =
+            new("NOT", SqlKeyword.Not, followedByKeywords: [ExistsKeyword]);
+
+        public static readonly SqlKeywordInfo IfKeyword =
+            new("IF", SqlKeyword.If, followedByKeywords: [NotKeyword, ExistsKeyword]);
+
+        public static readonly SqlKeywordInfo TableKeyword =
+            new("TABLE", SqlKeyword.Table, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo IndexKeyword =
-            new("INDEX", SqlKeyword.Index, DdlKeywords, followedByKeywords: [OnKeyword]);
+            new("INDEX", SqlKeyword.Index, [..DdlKeywords, SqlKeyword.Unique, SqlKeyword.Clustered, SqlKeyword.NonClustered], followedByKeywords: [OnKeyword, IfKeyword]);
 
         public static readonly SqlKeywordInfo ClusteredKeyword =
-            new("CLUSTERED", SqlKeyword.Clustered, DdlKeywords, followedByKeywords: [IndexKeyword]);
+            new("CLUSTERED", SqlKeyword.Clustered, [SqlKeyword.Unique], followedByKeywords: [IndexKeyword]);
 
         public static readonly SqlKeywordInfo NonClusteredKeyword =
-            new("NONCLUSTERED", SqlKeyword.NonClustered, DdlKeywords, followedByKeywords: [IndexKeyword]);
+            new("NONCLUSTERED", SqlKeyword.NonClustered, [SqlKeyword.Unique], followedByKeywords: [IndexKeyword]);
 
         public static readonly SqlKeywordInfo UniqueKeyword =
             new("UNIQUE", SqlKeyword.Unique, DdlKeywords, followedByKeywords:
                 [IndexKeyword, ClusteredKeyword, NonClusteredKeyword]);
 
         public static readonly SqlKeywordInfo TriggerKeyword =
-            new("TRIGGER", SqlKeyword.Trigger, DdlKeywords);
+            new("TRIGGER", SqlKeyword.Trigger, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo ViewKeyword =
-            new("VIEW", SqlKeyword.View, DdlKeywords);
+            new("VIEW", SqlKeyword.View, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo ProcedureKeyword =
-            new("PROCEDURE", SqlKeyword.Procedure, DdlKeywords);
+            new("PROCEDURE", SqlKeyword.Procedure, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo DatabaseKeyword =
-            new("DATABASE", SqlKeyword.Database, DdlKeywords);
+            new("DATABASE", SqlKeyword.Database, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo SchemaKeyword =
-            new("SCHEMA", SqlKeyword.Schema, DdlKeywords);
+            new("SCHEMA", SqlKeyword.Schema, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo FunctionKeyword =
-            new("FUNCTION", SqlKeyword.Function, DdlKeywords);
+            new("FUNCTION", SqlKeyword.Function, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo UserKeyword =
-            new("USER", SqlKeyword.User, DdlKeywords);
+            new("USER", SqlKeyword.User, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo RoleKeyword =
-            new("ROLE", SqlKeyword.Role, DdlKeywords);
+            new("ROLE", SqlKeyword.Role, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo SequenceKeyword =
-            new("SEQUENCE", SqlKeyword.Sequence, DdlKeywords);
+            new("SEQUENCE", SqlKeyword.Sequence, DdlKeywords, followedByKeywords: [IfKeyword]);
 
         public static readonly SqlKeywordInfo[] DdlSubKeywords = [
             TableKeyword, IndexKeyword, ViewKeyword, ProcedureKeyword, TriggerKeyword,
-            DatabaseKeyword, SchemaKeyword, FunctionKeyword, UserKeyword, RoleKeyword, SequenceKeyword
+            DatabaseKeyword, SchemaKeyword, FunctionKeyword, UserKeyword, RoleKeyword, SequenceKeyword, UniqueKeyword,
+            ClusteredKeyword, NonClusteredKeyword
         ];
 
         public static readonly SqlKeywordInfo CreateKeyword =
@@ -752,28 +765,36 @@ internal static class SqlProcessor
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool CaptureNextTokenInSummary(in ParseState state, SqlKeyword currentKeyword) => currentKeyword switch
         {
-            SqlKeyword.From => state.FirstSummaryKeyword == SqlKeyword.Select,
+            SqlKeyword.From => state.PreviousSummaryKeyword is SqlKeyword.Select or SqlKeyword.Distinct,
             SqlKeyword.On => state.PreviousSummaryKeyword == SqlKeyword.Join,
+            SqlKeyword.Into => state.FirstSummaryKeyword is SqlKeyword.Insert,
+            SqlKeyword.Join => state.FirstSummaryKeyword is SqlKeyword.Select or SqlKeyword.Join,
             SqlKeyword.Database or SqlKeyword.Schema or SqlKeyword.Table or SqlKeyword.Index or SqlKeyword.View
                 or SqlKeyword.Procedure or SqlKeyword.Trigger or SqlKeyword.Function or SqlKeyword.User
                 or SqlKeyword.Role or SqlKeyword.Sequence => state.FirstSummaryKeyword is SqlKeyword.Create or SqlKeyword.Alter or SqlKeyword.Drop,
+            SqlKeyword.Exists => state.FirstSummaryKeyword is SqlKeyword.Create or SqlKeyword.Alter or SqlKeyword.Drop,
             _ => false,
         };
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool CaptureInSummary(SqlKeyword previousKeyword)
+        public static bool CaptureInSummary(in ParseState state, SqlKeywordInfo currentKeyword)
         {
-            if (this.captureInSummaryWhenPrevious == null || this.captureInSummaryWhenPrevious.Length == 0)
+            if (currentKeyword.captureInSummaryWhenPrevious == null || currentKeyword.captureInSummaryWhenPrevious.Length == 0)
             {
                 return false;
             }
 
-            for (int i = 0; i < this.captureInSummaryWhenPrevious.Length; i++)
+            for (int i = 0; i < currentKeyword.captureInSummaryWhenPrevious.Length; i++)
             {
-                if (this.captureInSummaryWhenPrevious[i] == previousKeyword)
+                if (currentKeyword.captureInSummaryWhenPrevious[i] == state.PreviousParsedKeyword.SqlKeyword)
                 {
                     return true;
                 }
+            }
+
+            if (currentKeyword.SqlKeyword == SqlKeyword.Select && state.FirstSummaryKeyword is not SqlKeyword.Create)
+            {
+                return true;
             }
 
             return false;
