@@ -150,7 +150,7 @@
     },
     "expected": {
       "db.query.text": [
-        "ALTER VIEW ActiveUsers AS SELECT * FROM Users WHERE IsActive = 1;"
+        "ALTER VIEW ActiveUsers AS SELECT * FROM Users WHERE IsActive = ?;"
       ],
       "db.query.summary": "ALTER VIEW ActiveUsers"
     }
@@ -191,7 +191,7 @@
       "db.query.text": [
         "CREATE INDEX IX_Orders_CustomerId ON Orders (CustomerId) INCLUDE (OrderDate, TotalAmount);"
       ],
-      "db.query.summary": "CREATE INDEX Orders"
+      "db.query.summary": "CREATE INDEX IX_Orders_CustomerId"
     }
   },
   {
@@ -293,7 +293,7 @@
     },
     "expected": {
       "db.query.text": [
-        "SELECT u.Id, (SELECT COUNT(*) FROM Orders o WHERE o.UserId = u.Id) AS OrderCount FROM Users u WHERE u.IsActive = 1;"
+        "SELECT u.Id, (SELECT COUNT(*) FROM Orders o WHERE o.UserId = u.Id) AS OrderCount FROM Users u WHERE u.IsActive = ?;"
       ],
       "db.query.summary": "SELECT Users"
     }
@@ -540,7 +540,7 @@
     },
     "expected": {
       "db.query.text": [
-        "CREATE USER johndoe WITH PASSWORD = 'password';"
+        "CREATE USER johndoe WITH PASSWORD = ?;"
       ],
       "db.query.summary": "CREATE USER johndoe"
     }
@@ -553,7 +553,7 @@
     },
     "expected": {
       "db.query.text": [
-        "ALTER USER johndoe WITH PASSWORD = 'newpassword';"
+        "ALTER USER johndoe WITH PASSWORD = ?;"
       ],
       "db.query.summary": "ALTER USER johndoe"
     }
@@ -620,7 +620,7 @@
       "db.query.text": [
         "ALTER INDEX IX_Employee_Email ON Employees REBUILD;"
       ],
-      "db.query.summary": "ALTER INDEX Employees"
+      "db.query.summary": "ALTER INDEX IX_Employee_Email"
     }
   },
   {
