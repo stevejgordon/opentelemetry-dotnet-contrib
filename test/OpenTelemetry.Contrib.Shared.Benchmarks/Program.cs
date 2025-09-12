@@ -10,13 +10,8 @@ if (Debugger.IsAttached || (args.Length > 0 && args[0] == "execute"))
 {
     SqlProcessor.GetSanitizedSql("SELECT * FROM Orders o, OrderDetails od");
     SqlProcessor.GetSanitizedSql("SELECT * FROM Orders o, OrderDetails od");
-
-    Console.ReadKey();
-
     SqlProcessor.GetSanitizedSql("SELECT * FROM Orders o, OrderDetails od");
-
-    Console.ReadKey();
-
+    SqlProcessor.GetSanitizedSql("SELECT * FROM Orders o, OrderDetails od");
     SqlProcessor.GetSanitizedSql("SELECT * FROM Orders o, OrderDetails od");
 }
 else

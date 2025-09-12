@@ -37,6 +37,11 @@ internal static class SqlProcessor
         SqlKeywordInfo.SelectKeyword,
     ];
 
+    // Maintain our own approximate count to avoid ConcurrentDictionary.Count on hot path.
+    // We only increment on successful TryAdd. This may result in a slightly oversized cache under high concurrency
+    // but this is acceptable for the use case.
+    private static int approxCacheCount;
+
     private enum SqlKeyword
     {
         Unknown,
@@ -85,8 +90,26 @@ internal static class SqlProcessor
 
         sqlStatementInfo = SanitizeSql(sql.AsSpan());
 
-        // Best-effort capacity guard; may slightly exceed under concurrency which is acceptable for this cache
-        return Cache.Count >= CacheCapacity ? sqlStatementInfo : Cache.GetOrAdd(sql, sqlStatementInfo);
+        // Fast-path capacity check using our own approximate count to avoid ConcurrentDictionary.Count cost.
+        if (Volatile.Read(ref approxCacheCount) >= CacheCapacity)
+        {
+            return sqlStatementInfo;
+        }
+
+        // Attempt to add when under capacity. Increment our count only on successful add.
+        if (Cache.TryAdd(sql, sqlStatementInfo))
+        {
+            Interlocked.Increment(ref approxCacheCount);
+            return sqlStatementInfo;
+        }
+
+        // If another thread added meanwhile, return the cached value if available.
+        if (Cache.TryGetValue(sql, out var existing))
+        {
+            return existing;
+        }
+
+        return sqlStatementInfo;
     }
 
     private static SqlStatementInfo SanitizeSql(ReadOnlySpan<char> sql)
