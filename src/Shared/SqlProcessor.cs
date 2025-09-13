@@ -61,6 +61,7 @@ internal static class SqlProcessor
         View,
         Database,
         Trigger,
+        Union,
         Unique,
         NonClustered,
         Clustered,
@@ -288,24 +289,21 @@ internal static class SqlProcessor
                     state.SanitizedPosition += keywordLength;
 
                     // We only capture if we haven't already filled the summary to the max length of 255.
-                    if (state.SummaryPosition < 255)
+                    // Check if the keyword should be captured in the summary
+                    if (state.SummaryPosition < 255 && SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
                     {
-                        // Check if the keyword should be captured in the summary
-                        if (SqlKeywordInfo.CaptureInSummary(in state, potentialKeywordInfo))
+                        if (state.SummaryPosition == 0)
                         {
-                            if (state.SummaryPosition == 0)
-                            {
-                                state.FirstSummaryKeyword = potentialKeywordInfo.SqlKeyword;
-                            }
-
-                            sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
-                            state.SummaryPosition += keywordLength;
-
-                            // Add a space after the keyword. The trailing space will be trimmed later if needed.
-                            state.SummaryBuffer[state.SummaryPosition++] = ' ';
-
-                            state.PreviousSummaryKeyword = potentialKeywordInfo.SqlKeyword;
+                            state.FirstSummaryKeyword = potentialKeywordInfo.SqlKeyword;
                         }
+
+                        sqlToCopy.CopyTo(state.SummaryBuffer.Slice(state.SummaryPosition));
+                        state.SummaryPosition += keywordLength;
+
+                        // Add a space after the keyword. The trailing space will be trimmed later if needed.
+                        state.SummaryBuffer[state.SummaryPosition++] = ' ';
+
+                        state.PreviousSummaryKeyword = potentialKeywordInfo.SqlKeyword;
                     }
 
                     state.CaptureNextTokenInSummary = SqlKeywordInfo.CaptureNextTokenInSummary(in state, potentialKeywordInfo.SqlKeyword);
@@ -361,9 +359,7 @@ internal static class SqlProcessor
         else
         {
             var prevKeyword = state.PreviousParsedKeyword?.SqlKeyword ?? SqlKeyword.Unknown;
-            state.CaptureNextTokenInSummary =
-                (prevKeyword == SqlKeyword.From && nextChar == ',') ||
-                (prevKeyword == SqlKeyword.On && nextChar == '=');
+            state.CaptureNextTokenInSummary = prevKeyword == SqlKeyword.From && nextChar == ',';
 
             buffer[state.SanitizedPosition++] = nextChar;
             state.ParsePosition++;
@@ -739,6 +735,7 @@ internal static class SqlProcessor
             SequenceKeyword = new("sequence", SqlKeyword.Sequence, DdlKeywords);
             TableKeyword = new("table", SqlKeyword.Table, DdlKeywords);
             TriggerKeyword = new("trigger", SqlKeyword.Trigger, DdlKeywords);
+            UnionKeyword = new("union", SqlKeyword.Union);
             UniqueKeyword = new("unique", SqlKeyword.Unique, DdlKeywords);
             UnknownKeyword = new(string.Empty, SqlKeyword.Unknown);
             UpdateKeyword = new("update", SqlKeyword.Update, Unknown);
@@ -759,7 +756,7 @@ internal static class SqlProcessor
             DatabaseKeyword.FollowedByKeywords = [IfKeyword];
             DistinctKeyword.FollowedByKeywords = [FromKeyword];
             DropKeyword.FollowedByKeywords = DdlSubKeywords;
-            FromKeyword.FollowedByKeywords = [JoinKeyword];
+            FromKeyword.FollowedByKeywords = [JoinKeyword, UnionKeyword];
             FunctionKeyword.FollowedByKeywords = [IfKeyword];
             IfKeyword.FollowedByKeywords = [NotKeyword, ExistsKeyword];
             IndexKeyword.FollowedByKeywords = [OnKeyword, IfKeyword];
@@ -770,11 +767,12 @@ internal static class SqlProcessor
             OnKeyword.FollowedByKeywords = [JoinKeyword];
             ProcedureKeyword.FollowedByKeywords = [IfKeyword];
             RoleKeyword.FollowedByKeywords = [IfKeyword];
-            SchemaKeyword.FollowedByKeywords = [IfKeyword];
+            SchemaKeyword.FollowedByKeywords = [IfKeyword, UnionKeyword];
             SelectKeyword.FollowedByKeywords = [FromKeyword, DistinctKeyword];
             SequenceKeyword.FollowedByKeywords = [IfKeyword];
             TableKeyword.FollowedByKeywords = [IfKeyword];
             TriggerKeyword.FollowedByKeywords = [IfKeyword];
+            UnionKeyword.FollowedByKeywords = [SelectKeyword];
             UniqueKeyword.FollowedByKeywords = [IndexKeyword, ClusteredKeyword, NonClusteredKeyword];
             UserKeyword.FollowedByKeywords = [IfKeyword];
             ViewKeyword.FollowedByKeywords = [IfKeyword];
@@ -841,6 +839,8 @@ internal static class SqlProcessor
 
         public static SqlKeywordInfo TriggerKeyword { get; }
 
+        public static SqlKeywordInfo UnionKeyword { get; }
+
         public static SqlKeywordInfo UniqueKeyword { get; }
 
         public static SqlKeywordInfo UnknownKeyword { get; }
@@ -889,7 +889,8 @@ internal static class SqlProcessor
                 }
             }
 
-            if (currentKeyword.SqlKeyword == SqlKeyword.Select && state.FirstSummaryKeyword is not SqlKeyword.Create)
+            if (currentKeyword.SqlKeyword == SqlKeyword.Select
+                && state.FirstSummaryKeyword is not SqlKeyword.Create && state.PreviousParsedKeyword?.SqlKeyword is not SqlKeyword.Union)
             {
                 return true;
             }
