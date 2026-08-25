@@ -23,4 +23,13 @@
   policy type rather than by each source that carries it.
   ([#5122](https://github.com/open-telemetry/opentelemetry-dotnet-contrib/pull/5122))
 
+* Added an internal `JsonKeyValuePolicyParser` that decodes a complete UTF-8
+  JSON key-value policy payload into validated policy models, distinguishing a
+  payload that could not be decoded from one that decoded into an empty or
+  partially usable set via `PolicyPayloadParseResult`,
+  `PolicyPayloadRejection`, and `PayloadEntryLocation`. A payload that is not
+  well-formed UTF-8 is reported as malformed rather than decoding into a
+  partial set.
+  ([#TODO](https://github.com/open-telemetry/opentelemetry-dotnet-contrib/pull/TODO))
+
 For more details, please refer to the [README](README.md).
